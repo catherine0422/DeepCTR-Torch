@@ -64,11 +64,15 @@ class DeepFM(BaseModel):
             self.add_regularization_weight(self.dnn_linear.weight, l2=l2_reg_dnn)
         self.to(device)
 
-    def forward(self, X):
-
+    def get_embeddings(self, X):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
-        logit = self.linear_model(X)
+        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
+
+        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+
+    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
+        logit = self.linear_model.use_embeddings(linear_sparse_embedding_list, dense_value_list)
 
         if self.use_fm and len(sparse_embedding_list) > 0:
             fm_input = torch.cat(sparse_embedding_list, dim=1)
@@ -82,5 +86,13 @@ class DeepFM(BaseModel):
             logit += dnn_logit
 
         y_pred = self.out(logit)
+
+        return y_pred
+
+    def forward(self, X):
+
+        embeddings = self.get_embeddings(X)
+
+        y_pred = self.use_embeddings(*embeddings)
 
         return y_pred

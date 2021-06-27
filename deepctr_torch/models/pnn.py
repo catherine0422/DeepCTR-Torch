@@ -75,10 +75,14 @@ class PNN(BaseModel):
 
         self.to(device)
 
-    def forward(self, X):
-
+    def get_embeddings(self, X):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
+        linear_sparse_embedding_list = []
+
+        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+
+    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
         linear_signal = torch.flatten(
             concat_fun(sparse_embedding_list), start_dim=1)
 
@@ -106,4 +110,10 @@ class PNN(BaseModel):
 
         y_pred = self.out(logit)
 
+        return y_pred
+
+    def forward(self, X):
+        embeddings = self.get_embeddings(X)
+
+        y_pred = self.use_embeddings(*embeddings)
         return y_pred

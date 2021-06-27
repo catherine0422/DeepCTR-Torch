@@ -76,12 +76,16 @@ class xDeepFM(BaseModel):
 
         self.to(device)
 
-    def forward(self, X):
-
+    def get_embeddings(self, X):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
+        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
 
-        linear_logit = self.linear_model(X)
+        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+
+    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
+
+        linear_logit = self.linear_model.use_embeddings(linear_sparse_embedding_list, dense_value_list)
         if self.use_cin:
             cin_input = torch.cat(sparse_embedding_list, dim=1)
             cin_output = self.cin(cin_input)
@@ -103,5 +107,13 @@ class xDeepFM(BaseModel):
             raise NotImplementedError
 
         y_pred = self.out(final_logit)
+
+        return y_pred
+
+    def forward(self, X):
+
+        embeddings = self.get_embeddings(X)
+
+        y_pred = self.use_embeddings(*embeddings)
 
         return y_pred

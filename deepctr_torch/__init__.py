@@ -1,5 +1,6 @@
 from . import layers
 from . import models
+from . import attacks
 from .utils import check_version
 
 __version__ = '0.2.7'

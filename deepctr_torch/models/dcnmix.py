@@ -76,11 +76,16 @@ class DCNMix(BaseModel):
         self.add_regularization_weight(self.crossnet.C_list, l2=l2_reg_cross)
         self.to(device)
 
-    def forward(self, X):
-
-        logit = self.linear_model(X)
+    def get_embeddings(self, X):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
+        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
+
+        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+
+    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
+        logit = self.linear_model.use_embeddings(linear_sparse_embedding_list, dense_value_list)
+
 
         dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
 
@@ -98,4 +103,12 @@ class DCNMix(BaseModel):
         else:  # Error
             pass
         y_pred = self.out(logit)
+
+        return y_pred
+
+    def forward(self, X):
+        embeddings = self.get_embeddings(X)
+
+        y_pred = self.use_embeddings(*embeddings)
+
         return y_pred

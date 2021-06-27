@@ -5,7 +5,7 @@ from sklearn.preprocessing import LabelEncoder
 from tensorflow.python.keras.preprocessing.sequence import pad_sequences
 
 from deepctr_torch.inputs import SparseFeat, VarLenSparseFeat, get_feature_names
-from deepctr_torch.models import DeepFM
+from deepctr_torch.models import *
 
 
 def split(x):
@@ -17,11 +17,24 @@ def split(x):
     return list(map(lambda x: key2index[x], key_ans))
 
 
+def binarize(x):
+        if x > 3:
+            return 1
+        elif x < 3:
+            return 0
+        else:
+            return np.nan
+
+
 if __name__ == "__main__":
     data = pd.read_csv("./movielens_sample.txt")
     sparse_features = ["movie_id", "user_id",
                        "gender", "age", "occupation", "zip", ]
     target = ['rating']
+
+
+    data['rating'] = data['rating'].apply(lambda x: binarize(x))
+    data = data.dropna()
 
     # 1.Label Encoding for sparse features,and process sequence features
     for feat in sparse_features:
@@ -56,12 +69,15 @@ if __name__ == "__main__":
     # 4.Define Model,compile and train
 
     device = 'cpu'
-    use_cuda = True
+    use_cuda = False
     if use_cuda and torch.cuda.is_available():
         print('cuda ready...')
         device = 'cuda:0'
 
-    model = DeepFM(linear_feature_columns, dnn_feature_columns, task='regression', device=device)
+    # model = DeepFM(linear_feature_columns, dnn_feature_columns, task='binary', device=device)
+    model = PNN(dnn_feature_columns, task='binary', device=device)
 
-    model.compile("adam", "mse", metrics=['mse'], )
+    model.compile("adam", "binary_crossentropy",
+                  metrics=["binary_crossentropy", "auc"],)
     history = model.fit(model_input, data[target].values, batch_size=256, epochs=10, verbose=2, validation_split=0.2)
+

@@ -74,11 +74,15 @@ class AutoInt(BaseModel):
 
         self.to(device)
 
-    def forward(self, X):
-
+    def get_embeddings(self, X):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
-        logit = self.linear_model(X)
+        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
+
+        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+
+    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
+        logit = self.linear_model.use_embeddings(linear_sparse_embedding_list, dense_value_list)
 
         att_input = concat_fun(sparse_embedding_list, axis=1)
 
@@ -102,5 +106,12 @@ class AutoInt(BaseModel):
             pass
 
         y_pred = self.out(logit)
+        return y_pred
+
+    def forward(self, X):
+
+        embeddings = self.get_embeddings(X)
+
+        y_pred = self.use_embeddings(*embeddings)
 
         return y_pred

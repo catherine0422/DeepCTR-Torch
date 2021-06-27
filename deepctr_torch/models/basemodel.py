@@ -28,6 +28,8 @@ from ..inputs import build_input_features, SparseFeat, DenseFeat, VarLenSparseFe
 from ..layers import PredictionLayer
 from ..layers.utils import slice_arrays
 from ..callbacks import History
+from ..attacks.utils import *
+from ..attacks import FGSM
 
 
 class Linear(nn.Module):
@@ -59,8 +61,7 @@ class Linear(nn.Module):
                 device))
             torch.nn.init.normal_(self.weight, mean=0, std=init_std)
 
-    def forward(self, X, sparse_feat_refine_weight=None):
-
+    def input_from_feature_columns(self, X):
         sparse_embedding_list = [self.embedding_dict[feat.embedding_name](
             X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].long()) for
             feat in self.sparse_feature_columns]
@@ -75,7 +76,10 @@ class Linear(nn.Module):
 
         sparse_embedding_list += varlen_embedding_list
 
-        linear_logit = torch.zeros([X.shape[0], 1]).to(sparse_embedding_list[0].device)
+        return sparse_embedding_list, dense_value_list
+
+    def use_embeddings(self, sparse_embedding_list, dense_value_list, sparse_feat_refine_weight=None):
+        linear_logit = torch.zeros([sparse_embedding_list[0].shape[0], 1]).to(sparse_embedding_list[0].device)
         if len(sparse_embedding_list) > 0:
             sparse_embedding_cat = torch.cat(sparse_embedding_list, dim=-1)
             if sparse_feat_refine_weight is not None:
@@ -87,6 +91,14 @@ class Linear(nn.Module):
             dense_value_logit = torch.cat(
                 dense_value_list, dim=-1).matmul(self.weight)
             linear_logit += dense_value_logit
+
+        return linear_logit
+
+    def forward(self, X, sparse_feat_refine_weight=None):
+
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X)
+
+        linear_logit = self.use_embeddings(sparse_embedding_list, dense_value_list, sparse_feat_refine_weight)
 
         return linear_logit
 
@@ -134,7 +146,7 @@ class BaseModel(nn.Module):
         self.history = History()
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
-            validation_data=None, shuffle=True, callbacks=None):
+            validation_data=None, shuffle=True, callbacks=None, adv = False, attacker = FGSM(), lam = 1):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -241,25 +253,39 @@ class BaseModel(nn.Module):
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
 
+                        ## prediction on original sample
                         y_pred = model(x).squeeze()
-
                         optim.zero_grad()
                         loss = loss_func(y_pred, y.squeeze(), reduction='sum')
-                        reg_loss = self.get_regularization_loss()
 
-                        total_loss = loss + reg_loss + self.aux_loss
+                        adv_loss = 0
+                        if adv:
+                            original_embeddings = model.get_embeddings(x)
+                            deltas = attacker(x, y, model)
+                            adv_embeddings = add_nestLists(original_embeddings, deltas)
+                            adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                            adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+
+                        reg_loss = self.get_regularization_loss()
+                        total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
                         loss_epoch += loss.item()
                         total_loss_epoch += total_loss.item()
                         total_loss.backward()
                         optim.step()
 
-                        if verbose > 0:
+                        if verbose > 1:
                             for name, metric_fun in self.metrics.items():
                                 if name not in train_result:
                                     train_result[name] = []
                                 train_result[name].append(metric_fun(
                                     y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                                if adv:
+                                    name_adv = "adv_" + name
+                                    if name_adv not in train_result:
+                                        train_result[name_adv] = []
+                                    train_result[name_adv].append(metric_fun(
+                                        y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
 
 
             except KeyboardInterrupt:
@@ -276,8 +302,12 @@ class BaseModel(nn.Module):
                 eval_result = self.evaluate(val_x, val_y, batch_size)
                 for name, result in eval_result.items():
                     epoch_logs["val_" + name] = result
+                if adv:
+                    adv_eval_result = self.adv_attack(val_x, val_y, attacker, batch_size=batch_size)
+                    for name, result in adv_eval_result.items():
+                        epoch_logs["val_adv_" + name] = result
             # verbose
-            if verbose > 0:
+            if verbose > 1:
                 epoch_time = int(time.time() - start_time)
                 print('Epoch {0}/{1}'.format(epoch + 1, epochs))
 
@@ -287,11 +317,20 @@ class BaseModel(nn.Module):
                 for name in self.metrics:
                     eval_str += " - " + name + \
                                 ": {0: .4f}".format(epoch_logs[name])
+                    if adv:
+                        name_adv = "adv_" + name
+                        eval_str += " - " + name_adv + \
+                                    ": {0: .4f}".format(epoch_logs[name_adv])
 
                 if do_validation:
+                    eval_str += " \n "
                     for name in self.metrics:
                         eval_str += " - " + "val_" + name + \
                                     ": {0: .4f}".format(epoch_logs["val_" + name])
+                        if adv:
+                            name_adv = "adv_" + name
+                            eval_str += " - " + "val_" + name_adv + \
+                                        ": {0: .4f}".format(epoch_logs["val_" + name_adv])
                 print(eval_str)
             callbacks.on_epoch_end(epoch, epoch_logs)
             if self.stop_training:
@@ -344,6 +383,96 @@ class BaseModel(nn.Module):
 
         return np.concatenate(pred_ans).astype("float64")
 
+    def adv_attack(self, x, y, attacker, verbose = False, batch_size = 256):
+        r""" Apply adversarial attack on the data x, and return evaluations of the model under attack
+
+        :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
+        :param batch_size: Integer. If unspecified, it will default to 256.
+        :param attacker: Attack object.
+        :return: dict of evaluations
+        """
+        model = self.eval()
+        if isinstance(x, dict):
+            x = [x[feature] for feature in self.feature_index]
+        for i in range(len(x)):
+            if len(x[i].shape) == 1:
+                x[i] = np.expand_dims(x[i], axis=1)
+
+        tensor_data = Data.TensorDataset(
+            torch.from_numpy(np.concatenate(x, axis=-1)),
+            torch.from_numpy(y))
+        test_loader = DataLoader(
+            dataset=tensor_data, shuffle=False, batch_size=batch_size)
+
+        distortion_sum = 0.0
+        pred_ans = []
+        with torch.no_grad():
+            for x, label in test_loader:
+                x, label = x.to(self.device).float(), label.to(self.device).float()
+                original_embeddings = model.get_embeddings(x)
+
+                with torch.enable_grad():
+                    deltas = attacker(x, label, model)
+                adv_embeddings = add_nestLists(original_embeddings, deltas)
+                distortion_sum += get_rmse(deltas)
+
+                pred_an = model.use_embeddings(*adv_embeddings)
+                pred_ans.append(pred_an.cpu().data.numpy())
+        pred_ans = np.concatenate(pred_ans).astype("float64")
+
+        eval_result = {}
+        eval_result['attack'] = attacker.attack
+        eval_result['eps'] = attacker.eps
+        for name, metric_fun in self.metrics.items():
+            eval_result[name] = metric_fun(y, pred_ans)
+
+        distortion = distortion_sum / len(test_loader)
+        eval_result['distortion'] = distortion.item()
+        if verbose:
+            eval_str = ''
+            for k,v in eval_result.items():
+                eval_str += f'{k} = {v:.6f}, ' if type(v) != str else f'{k} = {v}, '
+            print(eval_str)
+        return eval_result
+
+    def calculate_emb_scales(self, x, batch_size):
+        r""" Calculate the scale of embeddings of x
+
+        :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
+        :param batch_size: Integer. If unspecified, it will default to 256.
+        :return: dict of means and std of embeddings
+        """
+        model = self.eval()
+        if isinstance(x, dict):
+            x = [x[feature] for feature in self.feature_index]
+        for i in range(len(x)):
+            if len(x[i].shape) == 1:
+                x[i] = np.expand_dims(x[i], axis=1)
+
+        tensor_data = Data.TensorDataset(
+            torch.from_numpy(np.concatenate(x, axis=-1)))
+        test_loader = DataLoader(
+            dataset=tensor_data, shuffle=False, batch_size=batch_size)
+
+        all_emb_lists = []
+        for x in test_loader:
+            x = x[0].to(self.device).float()
+            embeddings = model.get_embeddings(x)
+            embeddings_list = apply2nestLists(lambda x: x.view(-1).cpu().tolist(), embeddings)  ## turn tensor into list
+            if len(all_emb_lists) > 0:
+                all_emb_lists = add_nestLists(all_emb_lists, embeddings_list)
+            else:
+                all_emb_lists = embeddings_list
+        res = {}
+        res['sparse_emb_mean'] = np.concatenate(all_emb_lists[0]).mean() if len(all_emb_lists[0]) > 0 else np.nan
+        res['linear_sparse_emb_mean'] = np.concatenate(all_emb_lists[1]).mean() if len(all_emb_lists[1]) > 0 else np.nan
+        res['dense_value_mean'] = np.concatenate(all_emb_lists[2]).mean() if len(all_emb_lists[2]) > 0 else np.nan
+        res['sparse_emb_std'] = np.concatenate(all_emb_lists[0]).std() if len(all_emb_lists[0]) > 0 else np.nan
+        res['linear_sparse_emb_std'] = np.concatenate(all_emb_lists[1]).std() if len(all_emb_lists[1]) > 0 else np.nan
+        res['dense_value_std'] = np.concatenate(all_emb_lists[2]).std() if len(all_emb_lists[2]) > 0 else np.nan
+        return res
+
+
     def input_from_feature_columns(self, X, feature_columns, embedding_dict, support_dense=True):
 
         sparse_feature_columns = list(
@@ -369,6 +498,7 @@ class BaseModel(nn.Module):
 
         dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
                             dense_feature_columns]
+
 
         return sparse_embedding_list + varlen_sparse_embedding_list, dense_value_list
 
