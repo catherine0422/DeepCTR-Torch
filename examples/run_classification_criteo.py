@@ -10,7 +10,7 @@ from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 
 from deepctr_torch.inputs import SparseFeat, DenseFeat, get_feature_names
 from deepctr_torch.models import *
-from deepctr_torch.attacks import FGSM
+from deepctr_torch.attacks import FGSM,PGD
 
 if __name__ == "__main__":
     data = pd.read_csv('./criteo_sample.txt')
@@ -55,14 +55,14 @@ if __name__ == "__main__":
         print('cuda ready...')
         device = 'cuda:0'
 
-    attacker = FGSM()
+    attacker = PGD(eps=0.005, alpha=0.01/40, steps=40, random_start=True)
     print('Normal training')
 
     model = DeepFM(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
                    task='binary',
                    l2_reg_embedding=1e-5, device=device)
 
-    model.compile("adagrad", "binary_crossentropy",
+    model.compile("adam", "binary_crossentropy",
                   metrics=["binary_crossentropy", "auc"], )
 
 
@@ -72,22 +72,26 @@ if __name__ == "__main__":
     print(eval)
     adv_eval = model.adv_attack(test_model_input, test[target].values, attacker)
     print(adv_eval)
+
+    fgsm_attacker = FGSM(eps=0.005)
+    adv_eval = model.adv_attack(test_model_input, test[target].values, fgsm_attacker)
+    print(adv_eval)
     print()
 
-    print('Adver training')
-    model = DeepFM(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
-                   task='binary',
-                   l2_reg_embedding=1e-5, device=device)
-
-    model.compile("adagrad", "binary_crossentropy",
-                  metrics=["binary_crossentropy", "auc"], )
-
-    history = model.fit(train_model_input, train[target].values, batch_size=32, epochs=10, verbose=1,
-                        adv=True, validation_data=(test_model_input, test[target].values))
-    eval = model.evaluate(test_model_input, test[target].values)
-    print(eval)
-    adv_eval = model.adv_attack(test_model_input, test[target].values, attacker)
-    print(adv_eval)
+    # print('Adver training')
+    # model = DeepFM(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
+    #                task='binary',
+    #                l2_reg_embedding=1e-5, device=device)
+    #
+    # model.compile("adagrad", "binary_crossentropy",
+    #               metrics=["binary_crossentropy", "auc"], )
+    #
+    # history = model.fit(train_model_input, train[target].values, batch_size=32, epochs=10, verbose=1,
+    #                     adv=True, validation_data=(test_model_input, test[target].values))
+    # eval = model.evaluate(test_model_input, test[target].values)
+    # print(eval)
+    # adv_eval = model.adv_attack(test_model_input, test[target].values, attacker)
+    # print(adv_eval)
 
     # y = train[target].values
     # x = train_model_input

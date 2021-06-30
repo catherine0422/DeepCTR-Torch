@@ -23,7 +23,7 @@ class FGSM(Attack):
                 of linear sparse embedding list, the last is the delta of dense value.
 
     Examples::
-        >>> attack = deepctr_torch.attacks.FGSM(model, eps=0.001)
+        >>> attack = deepctr_torch.attacks.FGSM(eps=0.001)
         >>> adv_samples = attack(samples, labels)
 
     """

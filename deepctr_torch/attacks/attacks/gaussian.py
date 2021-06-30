@@ -22,7 +22,7 @@ class GAUSSIAN(Attack):
                 of linear sparse embedding list, the last is the delta of dense value.
 
     Examples::
-        >>> attack = deepctr_torch.attacks.GAUSSIAN(model, eps=0.001)
+        >>> attack = deepctr_torch.attacks.GAUSSIAN(eps=0.001)
         >>> adv_samples = attack(samples, labels)
 
     """

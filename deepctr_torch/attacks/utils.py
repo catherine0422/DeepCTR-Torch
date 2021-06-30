@@ -1,7 +1,10 @@
 import torch
 
-def apply2nestLists(f, xss):
-    return [[f(x) for x in xs] for xs in xss]
+def apply2nestLists(f, xss, needZip = False):
+    if needZip:
+        return [[f([x , y]) for (x, y) in zip(xs, ys)] for (xs, ys) in zip(*xss)]
+    else:
+        return [[f(x) for x in xs] for xs in xss]
 
 
 def clone_embs(x, device):
