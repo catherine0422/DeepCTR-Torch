@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as Data
 from sklearn.metrics import *
+from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -146,7 +147,7 @@ class BaseModel(nn.Module):
         self.history = History()
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
-            validation_data=None, shuffle=True, callbacks=None, adv = False, attacker = FGSM(), lam = 1):
+            validation_data=None, shuffle=True, callbacks=None, adv=False, attacker=FGSM(), lam=1, free_m=None):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -160,6 +161,10 @@ class BaseModel(nn.Module):
         :param validation_data: tuple `(x_val, y_val)` or tuple `(x_val, y_val, val_sample_weights)` on which to evaluate the loss and any model metrics at the end of each epoch. The model will not be trained on this data. `validation_data` will override `validation_split`.
         :param shuffle: Boolean. Whether to shuffle the order of the batches at the beginning of each epoch.
         :param callbacks: List of `deepctr_torch.callbacks.Callback` instances. List of callbacks to apply during training and validation (if ). See [callbacks](https://tensorflow.google.cn/api_docs/python/tf/keras/callbacks). Now available: `EarlyStopping` , `ModelCheckpoint`
+        :param adv: Boolean. Whether to use adv training or not.
+        :param attacker: Attack object. Perform adversarial attack in adv training.
+        :param lam: Float. Proportion between adv and origin samples in adv training.
+        :param free_m: Int or `None`. Number of loops to do adv free training.
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
@@ -240,6 +245,8 @@ class BaseModel(nn.Module):
         # Train
         print("Train on {0} samples, validate on {1} samples, {2} steps per epoch".format(
             len(train_tensor_data), len(val_y), steps_per_epoch))
+        if free_m is not None:
+            global_noise_data = []
         for epoch in range(initial_epoch, epochs):
             callbacks.on_epoch_begin(epoch)
             epoch_logs = {}
@@ -248,44 +255,83 @@ class BaseModel(nn.Module):
             total_loss_epoch = 0
             train_result = {}
             try:
-                with tqdm(enumerate(train_loader), disable=verbose != 1) as t:
+                with tqdm(enumerate(train_loader), disable=verbose == 0, leave=False) as t:
                     for _, (x_train, y_train) in t:
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
 
-                        ## prediction on original sample
-                        y_pred = model(x).squeeze()
-                        optim.zero_grad()
-                        loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+                        if adv and free_m is not None:
+                            # Adversarial training for free
+                            for i in range(free_m):
+                                # prediction on original sample
+                                optim.zero_grad()
+                                y_pred = model(x).squeeze()
+                                loss = loss_func(y_pred, y.squeeze(), reduction='sum')
 
-                        adv_loss = 0
-                        if adv:
-                            original_embeddings = model.get_embeddings(x)
-                            deltas = attacker(x, y, model)
-                            adv_embeddings = add_nestLists(original_embeddings, deltas)
-                            adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
-                            adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                # Ascend on the global noise
+                                original_embeddings = model.get_embeddings(x)
+                                if len(global_noise_data) == 0:
+                                    # initialize noise data
+                                    with torch.no_grad():
+                                        global_noise_data = apply2nestLists(
+                                            lambda x: torch.zeros_like(x).to(self.device), original_embeddings)
+                                noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                                              global_noise_data)
+                                adv_embeddings = add_nestLists(original_embeddings, noise_batch)
+                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                reg_loss = self.get_regularization_loss()
+                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
-                        reg_loss = self.get_regularization_loss()
-                        total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+                                loss_epoch += loss.item() / free_m
+                                total_loss_epoch += total_loss.item() / free_m
 
-                        loss_epoch += loss.item()
-                        total_loss_epoch += total_loss.item()
-                        total_loss.backward()
-                        optim.step()
+                                # compute gradient
+                                total_loss.backward()
+
+                                deltas = apply2nestLists(lambda x: attacker.eps * x.grad.sign(), noise_batch)
+                                global_noise_data = add_nestLists(deltas, global_noise_data)
+                                global_noise_data = apply2nestLists(lambda x: x.clamp(-attacker.eps, attacker.eps),
+                                                                    global_noise_data)
+
+                                optim.step()
+                        else:
+
+                            # prediction on original sample
+                            optim.zero_grad()
+                            y_pred = model(x).squeeze()
+                            loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+
+                            # prediction on adv sample
+                            adv_loss = 0
+                            if adv:
+                                original_embeddings = model.get_embeddings(x)
+                                deltas = attacker(x, y, model)
+                                adv_embeddings = add_nestLists(original_embeddings, deltas)
+                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+
+                            reg_loss = self.get_regularization_loss()
+                            total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+
+                            loss_epoch += loss.item()
+                            total_loss_epoch += total_loss.item()
+                            total_loss.backward()
+                            optim.step()
 
                         if verbose > 1:
-                            for name, metric_fun in self.metrics.items():
-                                if name not in train_result:
-                                    train_result[name] = []
-                                train_result[name].append(metric_fun(
-                                    y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
-                                if adv:
-                                    name_adv = "adv_" + name
-                                    if name_adv not in train_result:
-                                        train_result[name_adv] = []
-                                    train_result[name_adv].append(metric_fun(
-                                        y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
+                            if 0 in y and 1 in y:
+                                for name, metric_fun in self.metrics.items():
+                                    if name not in train_result:
+                                        train_result[name] = []
+                                    train_result[name].append(metric_fun(
+                                            y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                                    if adv:
+                                        name_adv = "adv_" + name
+                                        if name_adv not in train_result:
+                                            train_result[name_adv] = []
+                                        train_result[name_adv].append(metric_fun(
+                                            y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
 
 
             except KeyboardInterrupt:
@@ -383,7 +429,7 @@ class BaseModel(nn.Module):
 
         return np.concatenate(pred_ans).astype("float64")
 
-    def adv_attack(self, x, y, attacker, verbose = False, batch_size = 256):
+    def adv_attack(self, x, y, attacker, verbose=False, batch_size=256):
         r""" Apply adversarial attack on the data x, and return evaluations of the model under attack
 
         :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
@@ -430,7 +476,7 @@ class BaseModel(nn.Module):
         eval_result['distortion'] = distortion.item()
         if verbose:
             eval_str = ''
-            for k,v in eval_result.items():
+            for k, v in eval_result.items():
                 eval_str += f'{k} = {v:.6f}, ' if type(v) != str else f'{k} = {v}, '
             print(eval_str)
         return eval_result
@@ -472,7 +518,6 @@ class BaseModel(nn.Module):
         res['dense_value_std'] = np.concatenate(all_emb_lists[2]).std() if len(all_emb_lists[2]) > 0 else np.nan
         return res
 
-
     def input_from_feature_columns(self, X, feature_columns, embedding_dict, support_dense=True):
 
         sparse_feature_columns = list(
@@ -498,7 +543,6 @@ class BaseModel(nn.Module):
 
         dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
                             dense_feature_columns]
-
 
         return sparse_embedding_list + varlen_sparse_embedding_list, dense_value_list
 

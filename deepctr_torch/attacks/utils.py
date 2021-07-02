@@ -16,7 +16,20 @@ def get_grad(x, cost):
 
 
 def add_nestLists(xss, yss):
-    return [[x + y for (x, y) in zip(xs, ys)] for (xs, ys) in zip(xss, yss)]
+    size_x,size_y = xss[0][0].size(0), yss[0][0].size(0)
+    if size_x == size_y:
+        return [[x + y for (x, y) in zip(xs, ys)] for (xs, ys) in zip(xss, yss)]
+    else:
+        if size_x > size_y:
+            bigss,smallss = xss,yss
+        else:
+            bigss, smallss = yss, xss
+        for bigs,smalls in zip(bigss,smallss):
+            for big,small in zip(bigs,smalls):
+                big[:small.size(0)] += small
+        return bigss
+
+
 
 
 def cat_nestLists(xss, dim=1):
