@@ -28,9 +28,10 @@ class FGSM(Attack):
 
     """
 
-    def __init__(self, eps=0.001):
+    def __init__(self, eps=0.001, random_start=False):
         super(FGSM, self).__init__("FGSM")
         self.eps = eps
+        self.random_start = random_start
 
     def forward(self, samples, labels, model):
         r"""
@@ -44,12 +45,18 @@ class FGSM(Attack):
             model.eval()
 
         original_embeddings = model.get_embeddings(samples)
-        original_embeddings = apply2nestLists(lambda x: clone_embs(x, model.device), original_embeddings)
+        adv_embeddings = apply2nestLists(lambda x: x.clone().detach().to(model.device), original_embeddings)
+
+        if self.random_start:
+            # Starting at a uniformly random point
+            adv_embeddings = apply2nestLists(lambda x: x + torch.empty_like(x).uniform_(-self.eps, self.eps).detach(), adv_embeddings)
+
+        adv_embeddings = apply2nestLists(lambda x: x.requires_grad_(True), adv_embeddings)
         loss_fct = nn.BCELoss()
-        pred = model.use_embeddings(*original_embeddings)
+        pred = model.use_embeddings(*adv_embeddings)
         cost = loss_fct(pred, labels)
 
-        grads = apply2nestLists(lambda x: get_grad(x, cost), original_embeddings)
+        grads = apply2nestLists(lambda x: get_grad(x, cost), adv_embeddings)
         deltas = apply2nestLists(lambda x: self.eps * x.sign(), grads)
 
         if training_mode:

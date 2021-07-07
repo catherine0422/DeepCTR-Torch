@@ -147,7 +147,7 @@ class BaseModel(nn.Module):
         self.history = History()
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
-            validation_data=None, shuffle=True, callbacks=None, adv=False, attacker=FGSM(), lam=1, free_m=None):
+            validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -161,10 +161,9 @@ class BaseModel(nn.Module):
         :param validation_data: tuple `(x_val, y_val)` or tuple `(x_val, y_val, val_sample_weights)` on which to evaluate the loss and any model metrics at the end of each epoch. The model will not be trained on this data. `validation_data` will override `validation_split`.
         :param shuffle: Boolean. Whether to shuffle the order of the batches at the beginning of each epoch.
         :param callbacks: List of `deepctr_torch.callbacks.Callback` instances. List of callbacks to apply during training and validation (if ). See [callbacks](https://tensorflow.google.cn/api_docs/python/tf/keras/callbacks). Now available: `EarlyStopping` , `ModelCheckpoint`
-        :param adv: Boolean. Whether to use adv training or not.
+        :param adv_type: `None` or str in [normal, free, free_lb, free_new]. Whether to use adv training or not, and the type of adv train.
         :param attacker: Attack object. Perform adversarial attack in adv training.
         :param lam: Float. Proportion between adv and origin samples in adv training.
-        :param free_m: Int or `None`. Number of loops to do adv free training.
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
@@ -245,7 +244,7 @@ class BaseModel(nn.Module):
         # Train
         print("Train on {0} samples, validate on {1} samples, {2} steps per epoch".format(
             len(train_tensor_data), len(val_y), steps_per_epoch))
-        if free_m is not None:
+        if adv_type is not None and adv_type in ['free','free_new']:
             global_noise_data = []
         for epoch in range(initial_epoch, epochs):
             callbacks.on_epoch_begin(epoch)
@@ -260,9 +259,14 @@ class BaseModel(nn.Module):
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
 
-                        if adv and free_m is not None:
+                        if adv_type is not None and adv_type == 'free':
                             # Adversarial training for free
-                            for i in range(free_m):
+                            if not attacker or attacker.attack != 'PGD':
+                                raise ValueError('A PGD attacker should be implemented when using Free method.')
+                            eps = attacker.eps
+                            free_steps = attacker.steps
+
+                            for i in range(free_steps):
                                 # prediction on original sample
                                 optim.zero_grad()
                                 y_pred = model(x).squeeze()
@@ -272,9 +276,8 @@ class BaseModel(nn.Module):
                                 original_embeddings = model.get_embeddings(x)
                                 if len(global_noise_data) == 0:
                                     # initialize noise data
-                                    with torch.no_grad():
-                                        global_noise_data = apply2nestLists(
-                                            lambda x: torch.zeros_like(x).to(self.device), original_embeddings)
+                                    global_noise_data = apply2nestLists(
+                                            lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
                                 noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                                               global_noise_data)
                                 adv_embeddings = add_nestLists(original_embeddings, noise_batch)
@@ -283,18 +286,117 @@ class BaseModel(nn.Module):
                                 reg_loss = self.get_regularization_loss()
                                 total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
-                                loss_epoch += loss.item() / free_m
-                                total_loss_epoch += total_loss.item() / free_m
+                                loss_epoch += loss.item() / free_steps
+                                total_loss_epoch += total_loss.item()/free_steps
 
                                 # compute gradient
                                 total_loss.backward()
 
-                                deltas = apply2nestLists(lambda x: attacker.eps * x.grad.sign(), noise_batch)
+                                deltas = apply2nestLists(lambda x: eps * x.grad.sign(), noise_batch)
                                 global_noise_data = add_nestLists(deltas, global_noise_data)
-                                global_noise_data = apply2nestLists(lambda x: x.clamp(-attacker.eps, attacker.eps),
+                                global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
                                                                     global_noise_data)
 
                                 optim.step()
+
+                        elif adv_type is not None and adv_type == 'free_new':
+                            # Adversarial training for free
+                            if not attacker or attacker.attack != 'PGD':
+                                raise ValueError('A PGD attacker should be implemented when using Free method.')
+                            eps = attacker.eps
+                            alpha = attacker.alpha
+                            free_new_steps = attacker.steps
+                            random_start = attacker.random_start
+
+                            for i in range(free_new_steps):
+
+                                # prediction on original sample
+                                optim.zero_grad()
+                                y_pred = model(x).squeeze()
+                                loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+
+                                # Ascend on the global noise
+                                original_embeddings = model.get_embeddings(x)
+                                if len(global_noise_data) == 0:
+                                    # initialize noise data
+                                    if random_start:
+                                        global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
+                                    else:
+                                        global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
+                                noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                                              global_noise_data)
+                                adv_embeddings = add_nestLists(original_embeddings, noise_batch)
+                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                reg_loss = self.get_regularization_loss()
+                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+
+                                loss_epoch += loss.item() / free_new_steps
+                                total_loss_epoch += total_loss.item()/free_new_steps
+
+                                # compute gradient
+                                total_loss.backward()
+
+                                deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
+                                global_noise_data = add_nestLists(deltas, global_noise_data)
+                                global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
+                                                                    global_noise_data)
+
+                                optim.step()
+
+                        elif adv_type is not None and adv_type == 'free_lb':
+                            # Adversarial training for FREELB
+                            if not attacker or attacker.attack != 'PGD':
+                                 raise ValueError('A PGD attacker should be implemented when using Free-LB method.')
+                            eps = attacker.eps
+                            alpha = attacker.alpha
+                            free_lb_steps = attacker.steps
+                            random_start = attacker.random_start
+                            global_noise_data = []
+                            optim.zero_grad()
+
+                            # prediction on adv sample
+                            for i in range(free_lb_steps):
+
+                                # prediction on original sample
+                                y_pred = model(x).squeeze()
+                                loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+                                loss_epoch += loss.item() / free_lb_steps
+
+                                # Ascend on the global noise
+                                original_embeddings = model.get_embeddings(x)
+                                if len(global_noise_data) == 0:
+                                    # initialize noise data
+                                    if random_start:
+                                        global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
+                                    else:
+                                        global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
+                                noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                                              global_noise_data)
+                                adv_embeddings = add_nestLists(original_embeddings, noise_batch)
+                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                reg_loss = self.get_regularization_loss()
+                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                # total_loss = reg_loss + self.aux_loss + lam * adv_loss
+                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+
+                                total_loss_epoch += total_loss.item() / free_lb_steps
+
+                                # compute gradient
+                                total_loss.backward()
+
+                                deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
+                                global_noise_data = add_nestLists(deltas, global_noise_data)
+                                global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
+                                                                    global_noise_data)
+
+                            for param in model.parameters():
+                                    param.grad /= free_lb_steps
+                            optim.step()
+
+                        elif adv_type is not None and adv_type not in ['normal','free','free_lb','free_new']:
+                            raise NotImplementedError(f'adversarial training type not defined: {adv_type}, should be within' +
+                                                      f'["normal","free","free_lb","free_new"]')
                         else:
 
                             # prediction on original sample
@@ -304,7 +406,7 @@ class BaseModel(nn.Module):
 
                             # prediction on adv sample
                             adv_loss = 0
-                            if adv:
+                            if adv_type is not None:
                                 original_embeddings = model.get_embeddings(x)
                                 deltas = attacker(x, y, model)
                                 adv_embeddings = add_nestLists(original_embeddings, deltas)
@@ -326,7 +428,7 @@ class BaseModel(nn.Module):
                                         train_result[name] = []
                                     train_result[name].append(metric_fun(
                                             y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
-                                    if adv:
+                                    if adv_type is not None:
                                         name_adv = "adv_" + name
                                         if name_adv not in train_result:
                                             train_result[name_adv] = []
@@ -348,13 +450,15 @@ class BaseModel(nn.Module):
                 eval_result = self.evaluate(val_x, val_y, batch_size)
                 for name, result in eval_result.items():
                     epoch_logs["val_" + name] = result
-                if adv:
+                if adv_type is not None:
                     adv_eval_result = self.adv_attack(val_x, val_y, attacker, batch_size=batch_size)
                     for name, result in adv_eval_result.items():
                         epoch_logs["val_adv_" + name] = result
+
+            epoch_time = int(time.time() - start_time)
+            epoch_logs['epoch_time'] = epoch_time
             # verbose
             if verbose > 1:
-                epoch_time = int(time.time() - start_time)
                 print('Epoch {0}/{1}'.format(epoch + 1, epochs))
 
                 eval_str = "{0}s - loss: {1: .4f}".format(
@@ -363,7 +467,7 @@ class BaseModel(nn.Module):
                 for name in self.metrics:
                     eval_str += " - " + name + \
                                 ": {0: .4f}".format(epoch_logs[name])
-                    if adv:
+                    if adv_type is not None:
                         name_adv = "adv_" + name
                         eval_str += " - " + name_adv + \
                                     ": {0: .4f}".format(epoch_logs[name_adv])
@@ -373,7 +477,7 @@ class BaseModel(nn.Module):
                     for name in self.metrics:
                         eval_str += " - " + "val_" + name + \
                                     ": {0: .4f}".format(epoch_logs["val_" + name])
-                        if adv:
+                        if adv_type is not None:
                             name_adv = "adv_" + name
                             eval_str += " - " + "val_" + name_adv + \
                                         ": {0: .4f}".format(epoch_logs["val_" + name_adv])
