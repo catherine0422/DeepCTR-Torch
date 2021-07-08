@@ -161,7 +161,7 @@ class BaseModel(nn.Module):
         :param validation_data: tuple `(x_val, y_val)` or tuple `(x_val, y_val, val_sample_weights)` on which to evaluate the loss and any model metrics at the end of each epoch. The model will not be trained on this data. `validation_data` will override `validation_split`.
         :param shuffle: Boolean. Whether to shuffle the order of the batches at the beginning of each epoch.
         :param callbacks: List of `deepctr_torch.callbacks.Callback` instances. List of callbacks to apply during training and validation (if ). See [callbacks](https://tensorflow.google.cn/api_docs/python/tf/keras/callbacks). Now available: `EarlyStopping` , `ModelCheckpoint`
-        :param adv_type: `None` or str in [normal, free, free_lb, free_new]. Whether to use adv training or not, and the type of adv train.
+        :param adv_type: `None` or str in [normal, free, free_lb, free_new, trades]. Whether to use adv training or not, and the type of adv train.
         :param attacker: Attack object. Perform adversarial attack in adv training.
         :param lam: Float. Proportion between adv and origin samples in adv training.
 
@@ -259,162 +259,184 @@ class BaseModel(nn.Module):
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
 
-                        if adv_type is not None and adv_type == 'free':
-                            # Adversarial training for free
-                            if not attacker or attacker.attack != 'PGD':
-                                raise ValueError('A PGD attacker should be implemented when using Free method.')
-                            eps = attacker.eps
-                            free_steps = attacker.steps
 
-                            for i in range(free_steps):
-                                # prediction on original sample
+                        if adv_type is not None:
+                            if adv_type == 'free':
+                                # Adversarial training for free
+                                if not attacker or attacker.attack != 'PGD':
+                                    raise ValueError('A PGD attacker should be implemented when using Free method.')
+                                eps = attacker.eps
+                                free_steps = attacker.steps
+
+                                for i in range(free_steps):
+                                    # prediction on original sample
+                                    optim.zero_grad()
+                                    y_pred = model(x).squeeze()
+                                    loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+
+                                    # Ascend on the global noise
+                                    original_embeddings = model.get_embeddings(x)
+                                    if len(global_noise_data) == 0:
+                                        # initialize noise data
+                                        global_noise_data = apply2nestLists(
+                                                lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
+                                    noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                                                  global_noise_data)
+                                    adv_embeddings = add_nestLists(original_embeddings, noise_batch)
+                                    adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                    adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                    reg_loss = self.get_regularization_loss()
+                                    total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+
+                                    loss_epoch += loss.item() / free_steps
+                                    total_loss_epoch += total_loss.item()/free_steps
+
+                                    # compute gradient
+                                    total_loss.backward()
+
+                                    deltas = apply2nestLists(lambda x: eps * x.grad.sign(), noise_batch)
+                                    global_noise_data = add_nestLists(deltas, global_noise_data)
+                                    global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
+                                                                        global_noise_data)
+
+                                    optim.step()
+
+                            elif adv_type == 'free_new':
+                                # Adversarial training for free
+                                if not attacker or attacker.attack != 'PGD':
+                                    raise ValueError('A PGD attacker should be implemented when using Free method.')
+                                eps = attacker.eps
+                                alpha = attacker.alpha
+                                free_new_steps = attacker.steps
+                                random_start = attacker.random_start
+
+                                for i in range(free_new_steps):
+
+                                    # prediction on original sample
+                                    optim.zero_grad()
+                                    y_pred = model(x).squeeze()
+                                    loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+
+                                    # Ascend on the global noise
+                                    original_embeddings = model.get_embeddings(x)
+                                    if len(global_noise_data) == 0:
+                                        # initialize noise data
+                                        if random_start:
+                                            global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
+                                        else:
+                                            global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
+                                    noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                                                  global_noise_data)
+                                    adv_embeddings = add_nestLists(original_embeddings, noise_batch)
+                                    adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                    adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                    reg_loss = self.get_regularization_loss()
+                                    total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+
+                                    loss_epoch += loss.item() / free_new_steps
+                                    total_loss_epoch += total_loss.item()/free_new_steps
+
+                                    # compute gradient
+                                    total_loss.backward()
+
+                                    deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
+                                    global_noise_data = add_nestLists(deltas, global_noise_data)
+                                    global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
+                                                                        global_noise_data)
+
+                                    optim.step()
+
+                            elif adv_type == 'free_lb':
+                                # Adversarial training for FREELB
+                                if not attacker or attacker.attack != 'PGD':
+                                     raise ValueError('A PGD attacker should be implemented when using Free-LB method.')
+                                eps = attacker.eps
+                                alpha = attacker.alpha
+                                free_lb_steps = attacker.steps
+                                random_start = attacker.random_start
+                                global_noise_data = []
                                 optim.zero_grad()
-                                y_pred = model(x).squeeze()
-                                loss = loss_func(y_pred, y.squeeze(), reduction='sum')
 
-                                # Ascend on the global noise
-                                original_embeddings = model.get_embeddings(x)
-                                if len(global_noise_data) == 0:
-                                    # initialize noise data
-                                    global_noise_data = apply2nestLists(
-                                            lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
-                                noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                                              global_noise_data)
-                                adv_embeddings = add_nestLists(original_embeddings, noise_batch)
-                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
-                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
-                                reg_loss = self.get_regularization_loss()
-                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+                                # prediction on adv sample
+                                for i in range(free_lb_steps):
 
-                                loss_epoch += loss.item() / free_steps
-                                total_loss_epoch += total_loss.item()/free_steps
+                                    # prediction on original sample
+                                    y_pred = model(x).squeeze()
+                                    loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+                                    loss_epoch += loss.item() / free_lb_steps
 
-                                # compute gradient
-                                total_loss.backward()
+                                    # Ascend on the global noise
+                                    original_embeddings = model.get_embeddings(x)
+                                    if len(global_noise_data) == 0:
+                                        # initialize noise data
+                                        if random_start:
+                                            global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
+                                        else:
+                                            global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
+                                    noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                                                  global_noise_data)
+                                    adv_embeddings = add_nestLists(original_embeddings, noise_batch)
+                                    adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                    reg_loss = self.get_regularization_loss()
+                                    adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                    # total_loss = reg_loss + self.aux_loss + lam * adv_loss
+                                    total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
-                                deltas = apply2nestLists(lambda x: eps * x.grad.sign(), noise_batch)
-                                global_noise_data = add_nestLists(deltas, global_noise_data)
-                                global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
-                                                                    global_noise_data)
+                                    total_loss_epoch += total_loss.item() / free_lb_steps
 
+                                    # compute gradient
+                                    total_loss.backward()
+
+                                    deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
+                                    global_noise_data = add_nestLists(deltas, global_noise_data)
+                                    global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
+                                                                        global_noise_data)
+
+                                for param in model.parameters():
+                                        param.grad /= free_lb_steps
                                 optim.step()
 
-                        elif adv_type is not None and adv_type == 'free_new':
-                            # Adversarial training for free
-                            if not attacker or attacker.attack != 'PGD':
-                                raise ValueError('A PGD attacker should be implemented when using Free method.')
-                            eps = attacker.eps
-                            alpha = attacker.alpha
-                            free_new_steps = attacker.steps
-                            random_start = attacker.random_start
-
-                            for i in range(free_new_steps):
-
+                            elif adv_type in ['normal', 'trades']:
                                 # prediction on original sample
                                 optim.zero_grad()
-                                y_pred = model(x).squeeze()
-                                loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+                                y_pred = model(x)
+                                loss = loss_func(y_pred.squeeze(), y.squeeze(), reduction='sum')
 
-                                # Ascend on the global noise
+                                # prediction on adv sample
+                                adv_loss = 0
                                 original_embeddings = model.get_embeddings(x)
-                                if len(global_noise_data) == 0:
-                                    # initialize noise data
-                                    if random_start:
-                                        global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
-                                    else:
-                                        global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
-                                noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                                              global_noise_data)
-                                adv_embeddings = add_nestLists(original_embeddings, noise_batch)
-                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
-                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
+                                if adv_type == 'trades':
+                                    attacker.set_trades_mode(True)
+                                deltas = attacker(x, y, model)
+                                adv_embeddings = add_nestLists(original_embeddings, deltas)
+                                adv_pred = model.use_embeddings(*adv_embeddings)
+                                if adv_type == 'normal':
+                                    adv_loss = loss_func(adv_pred.squeeze(), y.squeeze(), reduction='sum')
+                                elif adv_type == 'trades':
+                                    adv_loss = trades_loss(y_pred, adv_pred)
+
+                                y_pred = y_pred.squeeze()
+                                adv_pred = adv_pred.squeeze()
                                 reg_loss = self.get_regularization_loss()
                                 total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
-                                loss_epoch += loss.item() / free_new_steps
-                                total_loss_epoch += total_loss.item()/free_new_steps
-
-                                # compute gradient
+                                loss_epoch += loss.item()
+                                total_loss_epoch += total_loss.item()
                                 total_loss.backward()
-
-                                deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
-                                global_noise_data = add_nestLists(deltas, global_noise_data)
-                                global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
-                                                                    global_noise_data)
-
                                 optim.step()
 
-                        elif adv_type is not None and adv_type == 'free_lb':
-                            # Adversarial training for FREELB
-                            if not attacker or attacker.attack != 'PGD':
-                                 raise ValueError('A PGD attacker should be implemented when using Free-LB method.')
-                            eps = attacker.eps
-                            alpha = attacker.alpha
-                            free_lb_steps = attacker.steps
-                            random_start = attacker.random_start
-                            global_noise_data = []
-                            optim.zero_grad()
+                                attacker.set_trades_mode(False)
 
-                            # prediction on adv sample
-                            for i in range(free_lb_steps):
-
-                                # prediction on original sample
-                                y_pred = model(x).squeeze()
-                                loss = loss_func(y_pred, y.squeeze(), reduction='sum')
-                                loss_epoch += loss.item() / free_lb_steps
-
-                                # Ascend on the global noise
-                                original_embeddings = model.get_embeddings(x)
-                                if len(global_noise_data) == 0:
-                                    # initialize noise data
-                                    if random_start:
-                                        global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
-                                    else:
-                                        global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
-                                noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                                              global_noise_data)
-                                adv_embeddings = add_nestLists(original_embeddings, noise_batch)
-                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
-                                reg_loss = self.get_regularization_loss()
-                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
-                                # total_loss = reg_loss + self.aux_loss + lam * adv_loss
-                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
-
-                                total_loss_epoch += total_loss.item() / free_lb_steps
-
-                                # compute gradient
-                                total_loss.backward()
-
-                                deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
-                                global_noise_data = add_nestLists(deltas, global_noise_data)
-                                global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
-                                                                    global_noise_data)
-
-                            for param in model.parameters():
-                                    param.grad /= free_lb_steps
-                            optim.step()
-
-                        elif adv_type is not None and adv_type not in ['normal','free','free_lb','free_new']:
-                            raise NotImplementedError(f'adversarial training type not defined: {adv_type}, should be within' +
-                                                      f'["normal","free","free_lb","free_new"]')
+                            elif adv_type not in ['normal','free','free_lb','free_new', 'trades']:
+                                raise NotImplementedError(f'adversarial training type not defined: {adv_type}, should be within' +
+                                                          f'["normal","free","free_lb","free_new", "trades"]')
                         else:
-
-                            # prediction on original sample
+                            ## normal traning
                             optim.zero_grad()
                             y_pred = model(x).squeeze()
                             loss = loss_func(y_pred, y.squeeze(), reduction='sum')
-
-                            # prediction on adv sample
-                            adv_loss = 0
-                            if adv_type is not None:
-                                original_embeddings = model.get_embeddings(x)
-                                deltas = attacker(x, y, model)
-                                adv_embeddings = add_nestLists(original_embeddings, deltas)
-                                adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
-                                adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
-
                             reg_loss = self.get_regularization_loss()
-                            total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+                            total_loss = loss + reg_loss + self.aux_loss
 
                             loss_epoch += loss.item()
                             total_loss_epoch += total_loss.item()
@@ -541,6 +563,24 @@ class BaseModel(nn.Module):
         :param attacker: Attack object.
         :return: dict of evaluations
         """
+
+        pred_ans,distortion = self.adv_pred(x,y,attacker, batch_size=batch_size)
+
+        eval_result = {}
+        eval_result['attack'] = attacker.attack
+        eval_result['eps'] = attacker.eps
+        for name, metric_fun in self.metrics.items():
+            eval_result[name] = metric_fun(y, pred_ans)
+
+        eval_result['distortion'] = distortion.item()
+        if verbose:
+            eval_str = ''
+            for k, v in eval_result.items():
+                eval_str += f'{k} = {v:.6f}, ' if type(v) != str else f'{k} = {v}, '
+            print(eval_str)
+        return eval_result
+
+    def adv_pred(self, x, y, attacker, batch_size=256):
         model = self.eval()
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
@@ -569,21 +609,8 @@ class BaseModel(nn.Module):
                 pred_an = model.use_embeddings(*adv_embeddings)
                 pred_ans.append(pred_an.cpu().data.numpy())
         pred_ans = np.concatenate(pred_ans).astype("float64")
-
-        eval_result = {}
-        eval_result['attack'] = attacker.attack
-        eval_result['eps'] = attacker.eps
-        for name, metric_fun in self.metrics.items():
-            eval_result[name] = metric_fun(y, pred_ans)
-
         distortion = distortion_sum / len(test_loader)
-        eval_result['distortion'] = distortion.item()
-        if verbose:
-            eval_str = ''
-            for k, v in eval_result.items():
-                eval_str += f'{k} = {v:.6f}, ' if type(v) != str else f'{k} = {v}, '
-            print(eval_str)
-        return eval_result
+        return pred_ans,distortion
 
     def calculate_emb_scales(self, x, batch_size):
         r""" Calculate the scale of embeddings of x

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from ..attack import Attack
 from ..utils import *
 
@@ -28,10 +28,11 @@ class FGSM(Attack):
 
     """
 
-    def __init__(self, eps=0.001, random_start=False):
+    def __init__(self, eps=0.001, random_start=False, trades = False):
         super(FGSM, self).__init__("FGSM")
         self.eps = eps
         self.random_start = random_start
+        self.trades = trades
 
     def forward(self, samples, labels, model):
         r"""
@@ -47,14 +48,18 @@ class FGSM(Attack):
         original_embeddings = model.get_embeddings(samples)
         adv_embeddings = apply2nestLists(lambda x: x.clone().detach().to(model.device), original_embeddings)
 
-        if self.random_start:
+        if self.random_start or self.trades:
             # Starting at a uniformly random point
             adv_embeddings = apply2nestLists(lambda x: x + torch.empty_like(x).uniform_(-self.eps, self.eps).detach(), adv_embeddings)
 
         adv_embeddings = apply2nestLists(lambda x: x.requires_grad_(True), adv_embeddings)
-        loss_fct = nn.BCELoss()
-        pred = model.use_embeddings(*adv_embeddings)
-        cost = loss_fct(pred, labels)
+        adv_pred = model.use_embeddings(*adv_embeddings)
+        if not self.trades:
+            loss_fct = nn.BCELoss()
+            cost = loss_fct(adv_pred, labels)
+        else:
+            pred = model.use_embeddings(*original_embeddings)
+            cost = trades_loss(pred, adv_pred)
 
         grads = apply2nestLists(lambda x: get_grad(x, cost), adv_embeddings)
         deltas = apply2nestLists(lambda x: self.eps * x.sign(), grads)

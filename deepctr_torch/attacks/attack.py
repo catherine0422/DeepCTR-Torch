@@ -19,6 +19,9 @@ class Attack(object):
         self.attack = name
         self._training_mode = False
 
+    def set_trades_mode(self, trades):
+        self.trades = trades
+
     def forward(self, *input):
         r"""
         It defines the computation performed at every call.
@@ -37,7 +40,7 @@ class Attack(object):
     def __str__(self):
         info = self.__dict__.copy()
 
-        del_keys = ['model', 'attack']
+        del_keys = ['attack']
 
         for key in info.keys():
             if key[0] == "_":

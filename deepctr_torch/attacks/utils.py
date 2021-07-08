@@ -30,8 +30,6 @@ def add_nestLists(xss, yss):
         return bigss
 
 
-
-
 def cat_nestLists(xss, dim=1):
     xs = [torch.cat(xs, dim=dim) for xs in xss if len(xs) > 0]
     x = torch.cat(xs, dim=dim)
@@ -56,3 +54,10 @@ def get_rmse(deltas):
     mse = torch.sum(deltas * deltas, dim=1) / delta_len
     rmse = torch.sqrt(mse).mean()
     return rmse
+
+def trades_loss(x, x_adv):
+    min_limit = torch.ones(x.shape).to(x.device) * 0.001
+    def log_cust(a):
+        return torch.log(torch.max(a, min_limit))
+    loss = x * (log_cust(x)-log_cust(x_adv)) + (1 - x) * (log_cust(1 - x)-log_cust(1-x_adv))
+    return loss.sum()
