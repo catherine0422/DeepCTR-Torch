@@ -39,13 +39,15 @@ class DeepFM(BaseModel):
                  linear_feature_columns, dnn_feature_columns, use_fm=True,
                  dnn_hidden_units=(256, 128),
                  l2_reg_linear=0.00001, l2_reg_embedding=0.00001, l2_reg_dnn=0, init_std=0.0001, seed=1024,
-                 dnn_dropout=0,
+                 dnn_dropout=0, emb_use_bn=False, emb_use_bn_simple=False,
                  dnn_activation='relu', dnn_use_bn=False, task='binary', device='cpu', gpus=None):
 
         super(DeepFM, self).__init__(linear_feature_columns, dnn_feature_columns, l2_reg_linear=l2_reg_linear,
                                      l2_reg_embedding=l2_reg_embedding, init_std=init_std, seed=seed, task=task,
                                      device=device, gpus=gpus)
 
+        self.emb_use_bn = emb_use_bn
+        self.emb_use_bn_simple = emb_use_bn_simple
         self.use_fm = use_fm
         self.use_dnn = len(dnn_feature_columns) > 0 and len(
             dnn_hidden_units) > 0
@@ -62,6 +64,15 @@ class DeepFM(BaseModel):
             self.add_regularization_weight(
                 filter(lambda x: 'weight' in x[0] and 'bn' not in x[0], self.dnn.named_parameters()), l2=l2_reg_dnn)
             self.add_regularization_weight(self.dnn_linear.weight, l2=l2_reg_dnn)
+
+        if self.emb_use_bn or self.emb_use_bn_simple:
+            affine = not self.emb_use_bn_simple
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
+                dnn_feature_columns)
+            self.emb_bn_sparse = nn.BatchNorm1d(sparse_emb_size, affine = affine) if sparse_emb_size> 0 else None
+            self.emb_bn_linear_sparse = nn.BatchNorm1d(linear_sparse_emb_size, affine = affine) if linear_sparse_emb_size> 0 else None
+            self.emb_bn_dense = nn.BatchNorm1d(dense_value_emb_size, affine = affine) if dense_value_emb_size > 0 else None
+
         self.to(device)
 
     def get_embeddings(self, X):
@@ -72,6 +83,14 @@ class DeepFM(BaseModel):
         sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze()
         linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze()
         dense_value_tensor = concat_fun(dense_value_list)
+
+        if self.emb_use_bn or self.emb_use_bn_simple:
+            if sparse_embedding_tensor is not None:
+                sparse_embedding_tensor = self.emb_bn_sparse(sparse_embedding_tensor)
+            if linear_sparse_embedding_tensor is not None:
+                linear_sparse_embedding_tensor = self.emb_bn_linear_sparse(linear_sparse_embedding_tensor)
+            if dense_value_tensor is not None:
+                dense_value_tensor = self.emb_bn_dense(dense_value_tensor)
 
         return sparse_embedding_tensor, linear_sparse_embedding_tensor, dense_value_tensor
 

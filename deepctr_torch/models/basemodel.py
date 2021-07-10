@@ -658,6 +658,19 @@ class BaseModel(nn.Module):
         res['dense_value_std'] = np.concatenate(all_emb_lists[2]).std() if len(all_emb_lists[2]) > 0 else np.nan
         return res
 
+    def emb_size_list_from_feature_columns(self, feature_columns):
+        sparse_feature_columns = list(
+            filter(lambda x: isinstance(x, SparseFeat) or isinstance(x, VarLenSparseFeat), feature_columns)) if len(
+            feature_columns) else []
+        dense_feature_columns = list(
+            filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if len(feature_columns) else []
+
+        sparse_emb_size = sum(feat.embedding_dim for feat in sparse_feature_columns)
+        linear_sparse_emb_size = len(sparse_feature_columns)
+        dense_value_emb_size = len(dense_feature_columns)
+
+        return sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size
+
     def input_from_feature_columns(self, X, feature_columns, embedding_dict, support_dense=True):
 
         sparse_feature_columns = list(
