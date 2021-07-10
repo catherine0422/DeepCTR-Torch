@@ -12,6 +12,8 @@ import torch
 def concat_fun(inputs, axis=-1):
     if len(inputs) == 1:
         return inputs[0]
+    elif len(inputs) == 0:
+        return None
     else:
         return torch.cat(inputs, dim=axis)
 

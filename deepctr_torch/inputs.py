@@ -138,6 +138,20 @@ def combined_dnn_input(sparse_embedding_list, dense_value_list):
         raise NotImplementedError
 
 
+def combined_dnn_input_tensor(sparse_embedding_tensor, dense_value_tensor):
+    if sparse_embedding_tensor is not None and dense_value_tensor is not None:
+        sparse_dnn_input = torch.flatten(sparse_embedding_tensor, start_dim=1)
+        dense_dnn_input = torch.flatten(dense_value_tensor, start_dim=1)
+        return concat_fun([sparse_dnn_input, dense_dnn_input])
+    elif sparse_embedding_tensor is not None:
+        flattend = torch.flatten(sparse_embedding_tensor, start_dim=1)
+        return flattend
+    elif dense_value_tensor is not None:
+        return torch.flatten(dense_value_tensor, start_dim=1)
+    else:
+        raise NotImplementedError
+
+
 def get_varlen_pooling_list(embedding_dict, features, feature_index, varlen_sparse_feature_columns, device):
     varlen_sparse_embedding_list = []
     for feat in varlen_sparse_feature_columns:

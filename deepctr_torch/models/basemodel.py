@@ -79,19 +79,17 @@ class Linear(nn.Module):
 
         return sparse_embedding_list, dense_value_list
 
-    def use_embeddings(self, sparse_embedding_list, dense_value_list, sparse_feat_refine_weight=None):
-        linear_logit = torch.zeros([sparse_embedding_list[0].shape[0], 1]).to(sparse_embedding_list[0].device)
-        if len(sparse_embedding_list) > 0:
-            sparse_embedding_cat = torch.cat(sparse_embedding_list, dim=-1)
+    def use_embeddings(self, sparse_embedding_cat, dense_value_cat, sparse_feat_refine_weight=None):
+        linear_logit = torch.tensor([0]).to(self.device)
+        if sparse_embedding_cat is not None:
             if sparse_feat_refine_weight is not None:
                 # w_{x,i}=m_{x,i} * w_i (in IFM and DIFM)
-                sparse_embedding_cat = sparse_embedding_cat * sparse_feat_refine_weight.unsqueeze(1)
-            sparse_feat_logit = torch.sum(sparse_embedding_cat, dim=-1, keepdim=False)
-            linear_logit += sparse_feat_logit
-        if len(dense_value_list) > 0:
-            dense_value_logit = torch.cat(
-                dense_value_list, dim=-1).matmul(self.weight)
-            linear_logit += dense_value_logit
+                sparse_embedding_cat = sparse_embedding_cat * sparse_feat_refine_weight
+            sparse_feat_logit = torch.sum(sparse_embedding_cat, dim=-1, keepdim=True)
+            linear_logit = sparse_feat_logit + linear_logit
+        if dense_value_cat is not None:
+            dense_value_logit = dense_value_cat.matmul(self.weight)
+            linear_logit = dense_value_logit + linear_logit
 
         return linear_logit
 
@@ -244,7 +242,7 @@ class BaseModel(nn.Module):
         # Train
         print("Train on {0} samples, validate on {1} samples, {2} steps per epoch".format(
             len(train_tensor_data), len(val_y), steps_per_epoch))
-        if adv_type is not None and adv_type in ['free','free_new']:
+        if adv_type is not None and adv_type in ['free', 'free_new']:
             global_noise_data = []
         for epoch in range(initial_epoch, epochs):
             callbacks.on_epoch_begin(epoch)
@@ -258,7 +256,6 @@ class BaseModel(nn.Module):
                     for _, (x_train, y_train) in t:
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
-
 
                         if adv_type is not None:
                             if adv_type == 'free':
@@ -279,9 +276,10 @@ class BaseModel(nn.Module):
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         global_noise_data = apply2nestLists(
-                                                lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
-                                    noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                                                  global_noise_data)
+                                            lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
+                                    noise_batch = apply2nestLists(
+                                        lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                        global_noise_data)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
@@ -289,7 +287,7 @@ class BaseModel(nn.Module):
                                     total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
                                     loss_epoch += loss.item() / free_steps
-                                    total_loss_epoch += total_loss.item()/free_steps
+                                    total_loss_epoch += total_loss.item() / free_steps
 
                                     # compute gradient
                                     total_loss.backward()
@@ -322,11 +320,16 @@ class BaseModel(nn.Module):
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         if random_start:
-                                            global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
+                                            global_noise_data = apply2nestLists(
+                                                lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(),
+                                                original_embeddings)
                                         else:
-                                            global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
-                                    noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                                                  global_noise_data)
+                                            global_noise_data = apply2nestLists(
+                                                lambda x: torch.zeros_like(x).to(self.device).detach(),
+                                                original_embeddings)
+                                    noise_batch = apply2nestLists(
+                                        lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                        global_noise_data)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
@@ -334,7 +337,7 @@ class BaseModel(nn.Module):
                                     total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
                                     loss_epoch += loss.item() / free_new_steps
-                                    total_loss_epoch += total_loss.item()/free_new_steps
+                                    total_loss_epoch += total_loss.item() / free_new_steps
 
                                     # compute gradient
                                     total_loss.backward()
@@ -349,7 +352,7 @@ class BaseModel(nn.Module):
                             elif adv_type == 'free_lb':
                                 # Adversarial training for FREELB
                                 if not attacker or attacker.attack != 'PGD':
-                                     raise ValueError('A PGD attacker should be implemented when using Free-LB method.')
+                                    raise ValueError('A PGD attacker should be implemented when using Free-LB method.')
                                 eps = attacker.eps
                                 alpha = attacker.alpha
                                 free_lb_steps = attacker.steps
@@ -370,11 +373,16 @@ class BaseModel(nn.Module):
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         if random_start:
-                                            global_noise_data = apply2nestLists(lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(), original_embeddings)
+                                            global_noise_data = apply2nestLists(
+                                                lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(),
+                                                original_embeddings)
                                         else:
-                                            global_noise_data = apply2nestLists(lambda x: torch.zeros_like(x).to(self.device).detach(), original_embeddings)
-                                    noise_batch = apply2nestLists(lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                                                  global_noise_data)
+                                            global_noise_data = apply2nestLists(
+                                                lambda x: torch.zeros_like(x).to(self.device).detach(),
+                                                original_embeddings)
+                                    noise_batch = apply2nestLists(
+                                        lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
+                                        global_noise_data)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
                                     reg_loss = self.get_regularization_loss()
@@ -393,7 +401,7 @@ class BaseModel(nn.Module):
                                                                         global_noise_data)
 
                                 for param in model.parameters():
-                                        param.grad /= free_lb_steps
+                                    param.grad /= free_lb_steps
                                 optim.step()
 
                             elif adv_type in ['normal', 'trades']:
@@ -427,9 +435,10 @@ class BaseModel(nn.Module):
 
                                 attacker.set_trades_mode(False)
 
-                            elif adv_type not in ['normal','free','free_lb','free_new', 'trades']:
-                                raise NotImplementedError(f'adversarial training type not defined: {adv_type}, should be within' +
-                                                          f'["normal","free","free_lb","free_new", "trades"]')
+                            elif adv_type not in ['normal', 'free', 'free_lb', 'free_new', 'trades']:
+                                raise NotImplementedError(
+                                    f'adversarial training type not defined: {adv_type}, should be within' +
+                                    f'["normal","free","free_lb","free_new", "trades"]')
                         else:
                             ## normal traning
                             optim.zero_grad()
@@ -449,7 +458,7 @@ class BaseModel(nn.Module):
                                     if name not in train_result:
                                         train_result[name] = []
                                     train_result[name].append(metric_fun(
-                                            y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                                        y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
                                     if adv_type is not None:
                                         name_adv = "adv_" + name
                                         if name_adv not in train_result:
@@ -564,7 +573,7 @@ class BaseModel(nn.Module):
         :return: dict of evaluations
         """
 
-        pred_ans,distortion = self.adv_pred(x,y,attacker, batch_size=batch_size)
+        pred_ans, distortion = self.adv_pred(x, y, attacker, batch_size=batch_size)
 
         eval_result = {}
         eval_result['attack'] = attacker.attack
@@ -610,7 +619,7 @@ class BaseModel(nn.Module):
                 pred_ans.append(pred_an.cpu().data.numpy())
         pred_ans = np.concatenate(pred_ans).astype("float64")
         distortion = distortion_sum / len(test_loader)
-        return pred_ans,distortion
+        return pred_ans, distortion
 
     def calculate_emb_scales(self, x, batch_size):
         r""" Calculate the scale of embeddings of x

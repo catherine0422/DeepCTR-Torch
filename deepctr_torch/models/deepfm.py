@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 
 from .basemodel import BaseModel
-from ..inputs import combined_dnn_input
-from ..layers import FM, DNN
+from ..inputs import combined_dnn_input, combined_dnn_input_tensor
+from ..layers import FM, DNN, concat_fun
 
 
 class DeepFM(BaseModel):
@@ -69,18 +69,23 @@ class DeepFM(BaseModel):
                                                                                   self.embedding_dict)
         linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
 
-        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+        sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze()
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze()
+        dense_value_tensor = concat_fun(dense_value_list)
 
-    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
-        logit = self.linear_model.use_embeddings(linear_sparse_embedding_list, dense_value_list)
+        return sparse_embedding_tensor, linear_sparse_embedding_tensor, dense_value_tensor
 
-        if self.use_fm and len(sparse_embedding_list) > 0:
-            fm_input = torch.cat(sparse_embedding_list, dim=1)
+    def use_embeddings(self, sparse_embedding_tensor, linear_sparse_embedding_tensor, dense_value_tensor):
+
+        logit = self.linear_model.use_embeddings(linear_sparse_embedding_tensor, dense_value_tensor)
+
+        if self.use_fm and sparse_embedding_tensor is not None:
+            # fm input size: [batch_size, sparse_feat_size, emb_size]
+            fm_input = sparse_embedding_tensor.view(sparse_embedding_tensor.size(0),-1,self.embedding_size)
             logit += self.fm(fm_input)
 
         if self.use_dnn:
-            dnn_input = combined_dnn_input(
-                sparse_embedding_list, dense_value_list)
+            dnn_input = combined_dnn_input_tensor(sparse_embedding_tensor, dense_value_tensor)
             dnn_output = self.dnn(dnn_input)
             dnn_logit = self.dnn_linear(dnn_output)
             logit += dnn_logit
