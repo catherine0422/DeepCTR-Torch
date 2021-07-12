@@ -31,6 +31,8 @@ class DeepFM(BaseModel):
     :param task: str, ``"binary"`` for  binary logloss or  ``"regression"`` for regression loss
     :param device: str, ``"cpu"`` or ``"cuda:0"``
     :param gpus: list of int or torch.device for multiple gpus. If None, run on `device`. `gpus[0]` should be the same gpu with `device`.
+    :param ln: int in [0,1,2], 1 means use layer norm without affine, 2 means layer norm with affine
+    :param ln_part_specified: int in [0,1,2], layer norm that specified in groups for FM part.
     :return: A PyTorch model instance.
 
     """
@@ -39,7 +41,7 @@ class DeepFM(BaseModel):
                  linear_feature_columns, dnn_feature_columns, use_fm=True,
                  dnn_hidden_units=(256, 128),
                  l2_reg_linear=0.00001, l2_reg_embedding=0.00001, l2_reg_dnn=0, init_std=0.0001, seed=1024,
-                 dnn_dropout=0, emb_use_bn=False, emb_use_bn_simple=False,
+                 dnn_dropout=0, emb_use_bn=False, emb_use_bn_simple=False, ln=0, ln_part_specified=0,
                  dnn_activation='relu', dnn_use_bn=False, task='binary', device='cpu', gpus=None):
 
         super(DeepFM, self).__init__(linear_feature_columns, dnn_feature_columns, l2_reg_linear=l2_reg_linear,
@@ -48,6 +50,8 @@ class DeepFM(BaseModel):
 
         self.emb_use_bn = emb_use_bn
         self.emb_use_bn_simple = emb_use_bn_simple
+        self.ln = ln
+        self.ln_part_specified = ln_part_specified
         self.use_fm = use_fm
         self.use_dnn = len(dnn_feature_columns) > 0 and len(
             dnn_hidden_units) > 0
@@ -69,9 +73,35 @@ class DeepFM(BaseModel):
             affine = not self.emb_use_bn_simple
             sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
                 dnn_feature_columns)
-            self.emb_bn_sparse = nn.BatchNorm1d(sparse_emb_size, affine = affine) if sparse_emb_size> 0 else None
-            self.emb_bn_linear_sparse = nn.BatchNorm1d(linear_sparse_emb_size, affine = affine) if linear_sparse_emb_size> 0 else None
-            self.emb_bn_dense = nn.BatchNorm1d(dense_value_emb_size, affine = affine) if dense_value_emb_size > 0 else None
+            self.emb_bn_sparse = nn.BatchNorm1d(sparse_emb_size, affine=affine) if sparse_emb_size > 0 else None
+            self.emb_bn_linear_sparse = nn.BatchNorm1d(linear_sparse_emb_size,
+                                                       affine=affine) if linear_sparse_emb_size > 0 else None
+            self.emb_bn_dense = nn.BatchNorm1d(dense_value_emb_size,
+                                               affine=affine) if dense_value_emb_size > 0 else None
+
+        if self.ln > 0:
+            elementwise_affine = True if self.ln > 1 else False
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
+                dnn_feature_columns)
+            self.ln_sparse = nn.LayerNorm(sparse_emb_size,
+                                          elementwise_affine=elementwise_affine) if sparse_emb_size > 0 else None
+            self.ln_linear_sparse = nn.LayerNorm(linear_sparse_emb_size,
+                                                 elementwise_affine=elementwise_affine) if linear_sparse_emb_size > 0 else None
+            self.ln_dense = nn.LayerNorm(dense_value_emb_size,
+                                         elementwise_affine=elementwise_affine) if dense_value_emb_size > 0 else None
+
+        if self.ln_part_specified > 0:
+            elementwise_affine = True if self.ln_part_specified > 1 else False
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
+                dnn_feature_columns)
+            self.ln_sparse_dnn = nn.LayerNorm(sparse_emb_size,
+                                              elementwise_affine=elementwise_affine) if sparse_emb_size > 0 else None
+            self.ln_sparse_fm = nn.LayerNorm(self.embedding_size,
+                                             elementwise_affine=elementwise_affine) if sparse_emb_size > 0 else None
+            self.ln_linear_sparse = nn.LayerNorm(linear_sparse_emb_size,
+                                                 elementwise_affine=elementwise_affine) if linear_sparse_emb_size > 0 else None
+            self.ln_dense = nn.LayerNorm(dense_value_emb_size,
+                                         elementwise_affine=elementwise_affine) if dense_value_emb_size > 0 else None
 
         self.to(device)
 
@@ -92,10 +122,32 @@ class DeepFM(BaseModel):
             if dense_value_tensor is not None:
                 dense_value_tensor = self.emb_bn_dense(dense_value_tensor)
 
+        if self.ln > 0:
+            if sparse_embedding_tensor is not None:
+                sparse_embedding_tensor = self.ln_sparse(sparse_embedding_tensor)
+            if linear_sparse_embedding_tensor is not None:
+                linear_sparse_embedding_tensor = self.ln_linear_sparse(linear_sparse_embedding_tensor)
+            if dense_value_tensor is not None:
+                dense_value_tensor = self.ln_dense(dense_value_tensor)
+
+        DNN_sparse_embedding_tensor = FM_sparse_embedding_tensor = sparse_embedding_tensor
+        LR_linear_sparse_embedding_tensor = linear_sparse_embedding_tensor
+        DNN_dense_value_tensor = LR_dense_value_tensor = dense_value_tensor
+
+        if self.ln_part_specified > 0:
+            part_specified = True
+            if sparse_embedding_tensor is not None:
+                bs = sparse_embedding_tensor.size(0)
+                DNN_sparse_embedding_tensor = self.ln_sparse_dnn(sparse_embedding_tensor)
+                FM_sparse_embedding_tensor = self.ln_sparse_fm(
+                    sparse_embedding_tensor.view(bs, -1, self.embedding_size))
+                FM_sparse_embedding_tensor = FM_sparse_embedding_tensor.view(bs, -1)
+            if linear_sparse_embedding_tensor is not None:
+                LR_linear_sparse_embedding_tensor = self.ln_linear_sparse(linear_sparse_embedding_tensor)
+            if dense_value_tensor is not None:
+                DNN_dense_value_tensor = LR_dense_value_tensor = self.ln_dense(dense_value_tensor)
+
         if part_specified:
-            DNN_sparse_embedding_tensor = FM_sparse_embedding_tensor = sparse_embedding_tensor
-            LR_linear_sparse_embedding_tensor = linear_sparse_embedding_tensor
-            DNN_dense_value_tensor = LR_dense_value_tensor = dense_value_tensor
             embedding_lists = [LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor,
                                DNN_dense_value_tensor, DNN_sparse_embedding_tensor]
         else:
@@ -106,7 +158,7 @@ class DeepFM(BaseModel):
     def use_embeddings(self, embedding_lists):
         part_specified = True if len(embedding_lists) > 3 else False
         if part_specified:
-            LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor,\
+            LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor, \
             DNN_dense_value_tensor, DNN_sparse_embedding_tensor = embedding_lists
         else:
             LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor = embedding_lists

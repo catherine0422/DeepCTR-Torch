@@ -101,12 +101,12 @@ def get_rmse(deltas):
     ## 将不同shape的delta合并
     if len(deltas) <= 0:
         return 0
-    deltas_num = len(deltas[0][0])
+    # deltas_num = len(deltas[0][0])
+    deltas_num = deltas[0].size(0)
     deltas = apply2nestLists(lambda x: x.view(deltas_num, -1), deltas)
     deltas = torch.cat(deltas, dim=1)
 
-    delta_len = len(deltas[0])
-    mse = torch.sum(deltas * deltas, dim=1) / delta_len
+    mse = torch.mean(deltas * deltas, dim=1)
     rmse = torch.sqrt(mse).mean()
     return rmse
 
