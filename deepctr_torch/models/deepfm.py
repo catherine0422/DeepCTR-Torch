@@ -64,7 +64,7 @@ class DeepFM(BaseModel):
             self.add_regularization_weight(self.dnn_linear.weight, l2=l2_reg_dnn)
         self.to(device)
 
-    def get_embeddings(self, X):
+    def get_embeddings(self, X, part_specified=False):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
         linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
@@ -73,10 +73,22 @@ class DeepFM(BaseModel):
         LR_linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze()
         DNN_dense_value_tensor = LR_dense_value_tensor = concat_fun(dense_value_list)
 
-        return LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor, DNN_dense_value_tensor, DNN_sparse_embedding_tensor
+        if part_specified:
+            embedding_lists = [LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor,
+                               DNN_dense_value_tensor, DNN_sparse_embedding_tensor]
+        else:
+            embedding_lists = [LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor]
 
-    def use_embeddings(self, LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor,
-                       DNN_dense_value_tensor, DNN_sparse_embedding_tensor):
+        return embedding_lists
+
+    def use_embeddings(self, embedding_lists):
+        part_specified = True if len(embedding_lists) > 3 else False
+        if part_specified:
+            LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor,\
+            DNN_dense_value_tensor, DNN_sparse_embedding_tensor = embedding_lists
+        else:
+            LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor = embedding_lists
+            DNN_dense_value_tensor, DNN_sparse_embedding_tensor = LR_dense_value_tensor, FM_sparse_embedding_tensor
 
         logit = self.linear_model.use_embeddings(LR_linear_sparse_embedding_tensor, LR_dense_value_tensor)
 
@@ -99,6 +111,6 @@ class DeepFM(BaseModel):
 
         embedding_lists = self.get_embeddings(X)
 
-        y_pred = self.use_embeddings(*embedding_lists)
+        y_pred = self.use_embeddings(embedding_lists)
 
         return y_pred

@@ -9,7 +9,7 @@ class Attack(object):
         It basically changes training mode to eval during attack process.
     """
 
-    def __init__(self, name):
+    def __init__(self, name, part_specified = False):
         r"""
         Initializes internal attack state.
         Arguments:
@@ -18,6 +18,7 @@ class Attack(object):
 
         self.attack = name
         self._training_mode = False
+        self.part_specified = part_specified
 
     def set_trades_mode(self, trades):
         self.trades = trades
@@ -49,7 +50,7 @@ class Attack(object):
         for key in del_keys:
             del info[key]
 
-        return self.attack + "(" + ', '.join('{}={}'.format(key, val) for key, val in info.items()) + ")"
+        return self.attack + "(" + ', '.join(f'{k}={v}' for k, v in info.items()) + ")"
 
     def __call__(self, *input, **kwargs):
 

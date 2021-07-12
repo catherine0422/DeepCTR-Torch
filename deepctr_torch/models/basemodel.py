@@ -153,13 +153,13 @@ class BaseModel(nn.Module):
         :param y: Numpy array of target (label) data (if the model has a single output), or list of Numpy arrays (if the model has multiple outputs).
         :param batch_size: Integer or `None`. Number of samples per gradient update. If unspecified, `batch_size` will default to 256.
         :param epochs: Integer. Number of epochs to train the model. An epoch is an iteration over the entire `x` and `y` data provided. Note that in conjunction with `initial_epoch`, `epochs` is to be understood as "final epoch". The model is not trained for a number of iterations given by `epochs`, but merely until the epoch of index `epochs` is reached.
-        :param verbose: Integer. 0, 1, or 2. Verbosity mode. 0 = silent, 1 = progress bar, 2 = one line per epoch.
+        :param verbose: Integer. 0, 1, 2 or 3. Verbosity mode. 0 = silent, 1 = progress bar, 2 = one line per epoch,3 = one progress bar and one line per epoch
         :param initial_epoch: Integer. Epoch at which to start training (useful for resuming a previous training run).
         :param validation_split: Float between 0 and 1. Fraction of the training data to be used as validation data. The model will set apart this fraction of the training data, will not train on it, and will evaluate the loss and any model metrics on this data at the end of each epoch. The validation data is selected from the last samples in the `x` and `y` data provided, before shuffling.
         :param validation_data: tuple `(x_val, y_val)` or tuple `(x_val, y_val, val_sample_weights)` on which to evaluate the loss and any model metrics at the end of each epoch. The model will not be trained on this data. `validation_data` will override `validation_split`.
         :param shuffle: Boolean. Whether to shuffle the order of the batches at the beginning of each epoch.
         :param callbacks: List of `deepctr_torch.callbacks.Callback` instances. List of callbacks to apply during training and validation (if ). See [callbacks](https://tensorflow.google.cn/api_docs/python/tf/keras/callbacks). Now available: `EarlyStopping` , `ModelCheckpoint`
-        :param adv_type: `None` or str in [normal, free, free_lb, free_new, trades]. Whether to use adv training or not, and the type of adv train.
+        :param adv_type: `None` or str in [normal, free, free_lb, trades]. Whether to use adv training or not, and the type of adv train.
         :param attacker: Attack object. Perform adversarial attack in adv training.
         :param lam: Float. Proportion between adv and origin samples in adv training.
 
@@ -252,7 +252,7 @@ class BaseModel(nn.Module):
             total_loss_epoch = 0
             train_result = {}
             try:
-                with tqdm(enumerate(train_loader), disable=verbose == 0, leave=False) as t:
+                with tqdm(enumerate(train_loader), disable=verbose not in [1,3], leave=False) as t:
                     for _, (x_train, y_train) in t:
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
@@ -272,7 +272,7 @@ class BaseModel(nn.Module):
                                     loss = loss_func(y_pred, y.squeeze(), reduction='sum')
 
                                     # Ascend on the global noise
-                                    original_embeddings = model.get_embeddings(x)
+                                    original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         global_noise_data = apply2nestLists(
@@ -281,7 +281,7 @@ class BaseModel(nn.Module):
                                         lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                         global_noise_data)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
-                                    adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                    adv_pred = model.use_embeddings(adv_embeddings).squeeze()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
                                     reg_loss = self.get_regularization_loss()
                                     total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
@@ -292,60 +292,10 @@ class BaseModel(nn.Module):
                                     # compute gradient
                                     total_loss.backward()
 
-                                    deltas = apply2nestLists(lambda x: eps * x.grad.sign(), noise_batch)
+
+                                    deltas = delta_step(noise_batch, eps, need_get_grad=True)
                                     global_noise_data = add_nestLists(deltas, global_noise_data)
-                                    global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
-                                                                        global_noise_data)
-
-                                    optim.step()
-
-                            elif adv_type == 'free_new':
-                                # Adversarial training for free
-                                if not attacker or attacker.attack != 'PGD':
-                                    raise ValueError('A PGD attacker should be implemented when using Free method.')
-                                eps = attacker.eps
-                                alpha = attacker.alpha
-                                free_new_steps = attacker.steps
-                                random_start = attacker.random_start
-
-                                for i in range(free_new_steps):
-
-                                    # prediction on original sample
-                                    optim.zero_grad()
-                                    y_pred = model(x).squeeze()
-                                    loss = loss_func(y_pred, y.squeeze(), reduction='sum')
-
-                                    # Ascend on the global noise
-                                    original_embeddings = model.get_embeddings(x)
-                                    if len(global_noise_data) == 0:
-                                        # initialize noise data
-                                        if random_start:
-                                            global_noise_data = apply2nestLists(
-                                                lambda x: torch.empty_like(x).uniform_(-eps, eps).detach(),
-                                                original_embeddings)
-                                        else:
-                                            global_noise_data = apply2nestLists(
-                                                lambda x: torch.zeros_like(x).to(self.device).detach(),
-                                                original_embeddings)
-                                    noise_batch = apply2nestLists(
-                                        lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
-                                        global_noise_data)
-                                    adv_embeddings = add_nestLists(original_embeddings, noise_batch)
-                                    adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
-                                    adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
-                                    reg_loss = self.get_regularization_loss()
-                                    total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
-
-                                    loss_epoch += loss.item() / free_new_steps
-                                    total_loss_epoch += total_loss.item() / free_new_steps
-
-                                    # compute gradient
-                                    total_loss.backward()
-
-                                    deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
-                                    global_noise_data = add_nestLists(deltas, global_noise_data)
-                                    global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
-                                                                        global_noise_data)
+                                    global_noise_data = clamp_step(global_noise_data, eps)
 
                                     optim.step()
 
@@ -369,7 +319,7 @@ class BaseModel(nn.Module):
                                     loss_epoch += loss.item() / free_lb_steps
 
                                     # Ascend on the global noise
-                                    original_embeddings = model.get_embeddings(x)
+                                    original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         if random_start:
@@ -384,7 +334,7 @@ class BaseModel(nn.Module):
                                         lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                         global_noise_data)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
-                                    adv_pred = model.use_embeddings(*adv_embeddings).squeeze()
+                                    adv_pred = model.use_embeddings(adv_embeddings).squeeze()
                                     reg_loss = self.get_regularization_loss()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
                                     # total_loss = reg_loss + self.aux_loss + lam * adv_loss
@@ -395,10 +345,9 @@ class BaseModel(nn.Module):
                                     # compute gradient
                                     total_loss.backward()
 
-                                    deltas = apply2nestLists(lambda x: alpha * x.grad.sign(), noise_batch)
+                                    deltas = delta_step(noise_batch, alpha, need_get_grad=True)
                                     global_noise_data = add_nestLists(deltas, global_noise_data)
-                                    global_noise_data = apply2nestLists(lambda x: x.clamp(-eps, eps),
-                                                                        global_noise_data)
+                                    global_noise_data = clamp_step(global_noise_data, eps)
 
                                 for param in model.parameters():
                                     param.grad /= free_lb_steps
@@ -412,12 +361,12 @@ class BaseModel(nn.Module):
 
                                 # prediction on adv sample
                                 adv_loss = 0
-                                original_embeddings = model.get_embeddings(x)
+                                original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
                                 if adv_type == 'trades':
                                     attacker.set_trades_mode(True)
                                 deltas = attacker(x, y, model)
                                 adv_embeddings = add_nestLists(original_embeddings, deltas)
-                                adv_pred = model.use_embeddings(*adv_embeddings)
+                                adv_pred = model.use_embeddings(adv_embeddings)
                                 if adv_type == 'normal':
                                     adv_loss = loss_func(adv_pred.squeeze(), y.squeeze(), reduction='sum')
                                 elif adv_type == 'trades':
@@ -576,8 +525,6 @@ class BaseModel(nn.Module):
         pred_ans, distortion = self.adv_pred(x, y, attacker, batch_size=batch_size)
 
         eval_result = {}
-        eval_result['attack'] = attacker.attack
-        eval_result['eps'] = attacker.eps
         for name, metric_fun in self.metrics.items():
             eval_result[name] = metric_fun(y, pred_ans)
 
@@ -586,6 +533,7 @@ class BaseModel(nn.Module):
             eval_str = ''
             for k, v in eval_result.items():
                 eval_str += f'{k} = {v:.6f}, ' if type(v) != str else f'{k} = {v}, '
+            eval_str += 'attack = ' + str(attacker)
             print(eval_str)
         return eval_result
 
@@ -608,20 +556,20 @@ class BaseModel(nn.Module):
         with torch.no_grad():
             for x, label in test_loader:
                 x, label = x.to(self.device).float(), label.to(self.device).float()
-                original_embeddings = model.get_embeddings(x)
+                original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
 
                 with torch.enable_grad():
                     deltas = attacker(x, label, model)
                 adv_embeddings = add_nestLists(original_embeddings, deltas)
                 distortion_sum += get_rmse(deltas)
 
-                pred_an = model.use_embeddings(*adv_embeddings)
+                pred_an = model.use_embeddings(adv_embeddings)
                 pred_ans.append(pred_an.cpu().data.numpy())
         pred_ans = np.concatenate(pred_ans).astype("float64")
         distortion = distortion_sum / len(test_loader)
         return pred_ans, distortion
 
-    def calculate_emb_scales(self, x, batch_size):
+    def calculate_emb_scales(self, x, batch_size, part_specified):
         r""" Calculate the scale of embeddings of x
 
         :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
@@ -643,7 +591,7 @@ class BaseModel(nn.Module):
         all_emb_lists = []
         for x in test_loader:
             x = x[0].to(self.device).float()
-            embeddings = model.get_embeddings(x)
+            embeddings = model.get_embeddings(x, part_specified=part_specified)
             embeddings_list = apply2nestLists(lambda x: x.view(-1).cpu().tolist(), embeddings)  ## turn tensor into list
             if len(all_emb_lists) > 0:
                 all_emb_lists = add_nestLists(all_emb_lists, embeddings_list)
