@@ -12,9 +12,9 @@ import time
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as Data
+from torch.utils.data import DataLoader
 from sklearn.metrics import *
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 try:
@@ -567,12 +567,17 @@ class BaseModel(nn.Module):
         distortion = distortion_sum / len(test_loader)
         return pred_ans, distortion
 
-    def calculate_emb_scales(self, x, batch_size, part_specified):
+    def get_full_emb_lists(self, x, batch_size=256, part_specified=False):
         r""" Calculate the scale of embeddings of x
 
         :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
         :param batch_size: Integer. If unspecified, it will default to 256.
-        :return: dict of means and std of embeddings
+        :return:
+            -not part_specified:
+                [dense_value_list, linear_sparse_embedding_list, sparse_embedding_list]
+            -part_specified:
+                [LR_dense_value_tensor, LR_linear_sparse_embedding_tensor, FM_sparse_embedding_tensor,
+                               DNN_dense_value_tensor, DNN_sparse_embedding_tensor]
         """
         model = self.eval()
         if isinstance(x, dict):
@@ -587,22 +592,19 @@ class BaseModel(nn.Module):
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
         all_emb_lists = []
+        def append_in_nest(x, y):
+            x.append(y)
+            return x
         for x in test_loader:
             x = x[0].to(self.device).float()
             embeddings = model.get_embeddings(x, part_specified=part_specified)
-            embeddings_list = apply2nestLists(lambda x: x.view(-1).cpu().tolist(), embeddings)  ## turn tensor into list
+            batch_embeddings_list = apply2nestLists(lambda x: x.cpu().detach().numpy(), embeddings)  ## turn tensor into list
             if len(all_emb_lists) > 0:
-                all_emb_lists = add_nestLists(all_emb_lists, embeddings_list)
+                all_emb_lists = apply2nestLists(append_in_nest, (all_emb_lists, batch_embeddings_list))
             else:
-                all_emb_lists = embeddings_list
-        res = {}
-        res['sparse_emb_mean'] = np.concatenate(all_emb_lists[0]).mean() if len(all_emb_lists[0]) > 0 else np.nan
-        res['linear_sparse_emb_mean'] = np.concatenate(all_emb_lists[1]).mean() if len(all_emb_lists[1]) > 0 else np.nan
-        res['dense_value_mean'] = np.concatenate(all_emb_lists[2]).mean() if len(all_emb_lists[2]) > 0 else np.nan
-        res['sparse_emb_std'] = np.concatenate(all_emb_lists[0]).std() if len(all_emb_lists[0]) > 0 else np.nan
-        res['linear_sparse_emb_std'] = np.concatenate(all_emb_lists[1]).std() if len(all_emb_lists[1]) > 0 else np.nan
-        res['dense_value_std'] = np.concatenate(all_emb_lists[2]).std() if len(all_emb_lists[2]) > 0 else np.nan
-        return res
+                all_emb_lists = apply2nestLists(lambda x: [x], batch_embeddings_list)
+        all_emb_lists = apply2nestLists(lambda x: np.concatenate(x, axis = 0), all_emb_lists)
+        return all_emb_lists
 
     def emb_size_list_from_feature_columns(self, feature_columns):
         sparse_feature_columns = list(
