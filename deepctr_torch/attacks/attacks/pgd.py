@@ -18,7 +18,7 @@ class PGD(Attack):
 
     """
 
-    def __init__(self, eps=0.001, alpha=0.002 / 7, steps=7, random_start=False, trades=False, part_specified=False):
+    def __init__(self, eps=0.001, alpha=None, steps=7, random_start=False, trades=False, part_specified=False,var_list = None, biased = False):
         """
         Arguments:
         --------
@@ -50,9 +50,15 @@ class PGD(Attack):
                     The first element is the delta of sparse embeddings list, the second is the delta
                     of linear sparse embedding list, the last is the delta of dense value.
         """
-        super(PGD, self).__init__("PGD", part_specified)
+        super(PGD, self).__init__("PGD", part_specified=part_specified, var_list = var_list, biased = biased)
         self.eps = eps
-        self.alpha = alpha
+        if alpha is None:
+            if type(eps) in [list,tuple]:
+                self.alpha = [3*x/steps for x in eps]
+            else:
+                self.alpha = 3*eps/steps
+        else:
+            self.alpha = alpha
         self.steps = steps
         self.random_start = random_start
         self.trades = trades
@@ -69,6 +75,7 @@ class PGD(Attack):
             model.eval()
 
         original_embeddings = model.get_embeddings(samples, self.part_specified)
+
         if self.trades:
             pred = model.use_embeddings(original_embeddings)
             loss_fct = nn.KLDivLoss(reduction='batchmean')
@@ -80,6 +87,8 @@ class PGD(Attack):
             # Starting at a uniformly random point
             adv_embeddings = apply2nestLists(lambda x: x + torch.empty_like(x).uniform_(-self.eps, self.eps).detach(),
                                              adv_embeddings)
+        if self.biased:
+            normed_original_embeddings = normalize_data(original_embeddings, self.var_list, self.bias_eps)
 
         for i in range(self.steps):
 
@@ -93,10 +102,19 @@ class PGD(Attack):
 
             grads = apply2nestLists(lambda x: get_grad(x, cost), adv_embeddings)
             deltas = delta_step(grads, self.alpha)
-            global_distortion = apply2nestLists(lambda x, y, z: x + y - z,
-                                                (adv_embeddings, deltas, original_embeddings))
-            deltas = clamp_step(global_distortion, self.eps)
-            adv_embeddings = apply2nestLists(lambda x, y: (x + y).detach(), (original_embeddings, deltas))
+
+            if self.biased:
+                normed_adv_embeddings = normalize_data(adv_embeddings, self.var_list, self.bias_eps)
+                global_distortion = apply2nestLists(lambda x, y, z: x + y - z,
+                                                    (normed_adv_embeddings, deltas, normed_original_embeddings))
+                deltas = clamp_step(global_distortion, self.eps)
+                deltas = denormalize_data(deltas, self.var_list, self.bias_eps)
+                adv_embeddings = apply2nestLists(lambda x, y: (x + y).detach(), (original_embeddings, deltas))
+            else:
+                global_distortion = apply2nestLists(lambda x, y, z: x + y - z,
+                                                    (adv_embeddings, deltas, original_embeddings))
+                deltas = clamp_step(global_distortion, self.eps)
+                adv_embeddings = apply2nestLists(lambda x, y: (x + y).detach(), (original_embeddings, deltas))
 
         if training_mode:
             model.train()

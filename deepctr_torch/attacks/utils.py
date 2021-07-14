@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 
 
 def check_None(f, x, multi_arg=False):
@@ -19,22 +18,6 @@ def apply2nestLists(f, xs):
         return [check_None(f, x) for x in xs]
 
 
-# def delta_step(grads, eps, need_get_grad = False):
-#     if type(eps) in [list, np.ndarray, tuple]:
-#         if len(eps) != len(grads):
-#             raise ValueError(
-#                 f'number of distortion step dosen\'t fit the number of embeddings: {len(eps)} != {len(grads)}')
-#         if need_get_grad:
-#             deltas = apply2nestLists(lambda x, y: x * y.grad.sign(), (eps, grads))
-#         else:
-#             deltas = apply2nestLists(lambda x, y: x * y.sign(), (eps, grads))
-#     else:
-#         if need_get_grad:
-#             deltas = apply2nestLists(lambda x: eps * x.grad.sign(), grads)
-#         else:
-#             deltas = apply2nestLists(lambda x: eps * x.sign(), grads)
-#     return deltas
-
 def delta_step(grads, eps, need_get_grad = False):
     if need_get_grad:
         f = lambda x,y: (x*y.grad.sign()).detach()
@@ -50,7 +33,7 @@ def clamp_step(deltas, eps):
 
 
 def func_detect_arg_type(f, unclear_arg, *others):
-    if type(unclear_arg) in [list, np.ndarray, tuple]:
+    if type(unclear_arg) in [list, tuple]:
         if len(unclear_arg) != len(others[0]):
             raise ValueError(
                 f'number of values dosen\'t fit: {len(unclear_arg)} != {len(others[0])}')
@@ -101,7 +84,6 @@ def get_rmse(deltas):
     ## 将不同shape的delta合并
     if len(deltas) <= 0:
         return 0
-    # deltas_num = len(deltas[0][0])
     deltas_num = deltas[0].size(0)
     deltas = apply2nestLists(lambda x: x.view(deltas_num, -1), deltas)
     deltas = torch.cat(deltas, dim=1)
@@ -119,3 +101,13 @@ def trades_loss(x, x_adv):
 
     loss = x * (log_cust(x) - log_cust(x_adv)) + (1 - x) * (log_cust(1 - x) - log_cust(1 - x_adv))
     return loss.sum()
+
+
+def denormalize_data(datas, var_list, bias_eps = 1e-5):
+    datas = apply2nestLists(lambda x, y: x * (torch.sqrt(y + bias_eps)), (datas, var_list))
+    return datas
+
+
+def normalize_data(datas, var_list, bias_eps = 1e-5):
+    datas = apply2nestLists(lambda x, y: x / (torch.sqrt(y + bias_eps)), (datas, var_list))
+    return datas

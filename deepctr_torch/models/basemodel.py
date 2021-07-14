@@ -8,7 +8,7 @@ Author:
 from __future__ import print_function
 
 import time
-
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as Data
@@ -143,7 +143,8 @@ class BaseModel(nn.Module):
         self.history = History()
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
-            validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1):
+            validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1,
+            normalized_attack=0, eval_batch_size=256):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -160,9 +161,11 @@ class BaseModel(nn.Module):
         :param adv_type: `None` or str in [normal, free, free_lb, trades]. Whether to use adv training or not, and the type of adv train.
         :param attacker: Attack object. Perform adversarial attack in adv training.
         :param lam: Float. Proportion between adv and origin samples in adv training.
+        :param normalized_attack: Int. 0, 1. Whether to normalize attack. 0 = False. 1 = Normalize according to the whole training data.
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
+        x_full = x
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
 
@@ -250,7 +253,7 @@ class BaseModel(nn.Module):
             total_loss_epoch = 0
             train_result = {}
             try:
-                with tqdm(enumerate(train_loader), disable=verbose not in [1,3], leave=False) as t:
+                with tqdm(enumerate(train_loader), disable=verbose not in [1, 3], leave=False) as t:
                     for _, (x_train, y_train) in t:
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
@@ -270,7 +273,8 @@ class BaseModel(nn.Module):
                                     loss = loss_func(y_pred, y.squeeze(), reduction='sum')
 
                                     # Ascend on the global noise
-                                    original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
+                                    original_embeddings = model.get_embeddings(x,
+                                                                               part_specified=attacker.part_specified)
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         global_noise_data = apply2nestLists(
@@ -278,6 +282,14 @@ class BaseModel(nn.Module):
                                     noise_batch = apply2nestLists(
                                         lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                         global_noise_data)
+                                    if normalized_attack > 0:
+                                        if normalized_attack == 1:
+                                            var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
+                                        if normalized_attack == 2:
+                                            var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                                       original_embeddings)
+                                        noise_batch = denormalize_data(noise_batch, var_list)
+                                        noise_batch = apply2nestLists(lambda x:Variable(x, requires_grad=True).to(self.device),noise_batch)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(adv_embeddings).squeeze()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
@@ -289,7 +301,6 @@ class BaseModel(nn.Module):
 
                                     # compute gradient
                                     total_loss.backward()
-
 
                                     deltas = delta_step(noise_batch, eps, need_get_grad=True)
                                     global_noise_data = add_nestLists(deltas, global_noise_data)
@@ -317,7 +328,8 @@ class BaseModel(nn.Module):
                                     loss_epoch += loss.item() / free_lb_steps
 
                                     # Ascend on the global noise
-                                    original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
+                                    original_embeddings = model.get_embeddings(x,
+                                                                               part_specified=attacker.part_specified)
                                     if len(global_noise_data) == 0:
                                         # initialize noise data
                                         if random_start:
@@ -331,11 +343,18 @@ class BaseModel(nn.Module):
                                     noise_batch = apply2nestLists(
                                         lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                         global_noise_data)
+                                    if normalized_attack > 0:
+                                        if normalized_attack == 1:
+                                            var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
+                                        if normalized_attack == 2:
+                                            var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                                       original_embeddings)
+                                        noise_batch = denormalize_data(noise_batch, var_list)
+                                        noise_batch = apply2nestLists(lambda x:Variable(x, requires_grad=True).to(self.device),noise_batch)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(adv_embeddings).squeeze()
                                     reg_loss = self.get_regularization_loss()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
-                                    # total_loss = reg_loss + self.aux_loss + lam * adv_loss
                                     total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
 
                                     total_loss_epoch += total_loss.item() / free_lb_steps
@@ -362,6 +381,12 @@ class BaseModel(nn.Module):
                                 original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
                                 if adv_type == 'trades':
                                     attacker.set_trades_mode(True)
+                                if normalized_attack == 1:
+                                    var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
+                                    attacker.set_bias(var_list)
+                                if normalized_attack == 2:
+                                    var_list = apply2nestLists(lambda x: torch.var(x.detach(),dim=0), original_embeddings)
+                                    attacker.set_bias(var_list)
                                 deltas = attacker(x, y, model)
                                 adv_embeddings = add_nestLists(original_embeddings, deltas)
                                 adv_pred = model.use_embeddings(adv_embeddings)
@@ -425,11 +450,11 @@ class BaseModel(nn.Module):
                 epoch_logs[name] = np.sum(result) / steps_per_epoch
 
             if do_validation:
-                eval_result = self.evaluate(val_x, val_y, batch_size)
+                eval_result = self.evaluate(val_x, val_y, eval_batch_size)
                 for name, result in eval_result.items():
                     epoch_logs["val_" + name] = result
                 if adv_type is not None:
-                    adv_eval_result = self.adv_attack(val_x, val_y, attacker, batch_size=batch_size)
+                    adv_eval_result = self.adv_attack(val_x, val_y, attacker, batch_size=eval_batch_size)
                     for name, result in adv_eval_result.items():
                         epoch_logs["val_adv_" + name] = result
 
@@ -592,19 +617,27 @@ class BaseModel(nn.Module):
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
         all_emb_lists = []
+
         def append_in_nest(x, y):
             x.append(y)
             return x
+
         for x in test_loader:
             x = x[0].to(self.device).float()
             embeddings = model.get_embeddings(x, part_specified=part_specified)
-            batch_embeddings_list = apply2nestLists(lambda x: x.cpu().detach().numpy(), embeddings)  ## turn tensor into list
+            batch_embeddings_list = apply2nestLists(lambda x: x.cpu().detach().numpy(),
+                                                    embeddings)  ## turn tensor into list
             if len(all_emb_lists) > 0:
                 all_emb_lists = apply2nestLists(append_in_nest, (all_emb_lists, batch_embeddings_list))
             else:
                 all_emb_lists = apply2nestLists(lambda x: [x], batch_embeddings_list)
-        all_emb_lists = apply2nestLists(lambda x: np.concatenate(x, axis = 0), all_emb_lists)
+        all_emb_lists = apply2nestLists(lambda x: np.concatenate(x, axis=0), all_emb_lists)
         return all_emb_lists
+
+    def compute_full_emb_var(self, x, batch_size=256, part_specified=False):
+        all_emb_lists = self.get_full_emb_lists(x, batch_size, part_specified)
+        all_emb_var = apply2nestLists(lambda x: torch.tensor(np.var(x, axis=0)).to(self.device), all_emb_lists)
+        return all_emb_var
 
     def emb_size_list_from_feature_columns(self, feature_columns):
         sparse_feature_columns = list(
