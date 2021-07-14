@@ -105,10 +105,18 @@ class DeepFM(BaseModel):
 
         self.to(device)
 
-    def get_embeddings(self, X, part_specified=False):
-        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
+    def get_one_hot_values(self, X):
+        dense_value_list, sparse_value_list, var_len_sparse_value_list = self.one_hot_value_from_feature_columns(X,
+                                                                                                                 self.dnn_feature_columns)
+        return dense_value_list, sparse_value_list, var_len_sparse_value_list
+
+    def get_embeddings(self, X, value_lists=None, part_specified=False):
+        if value_lists is None:
+            value_lists = self.get_one_hot_values(X)
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(*value_lists, X,
+                                                                                  self.dnn_feature_columns,
                                                                                   self.embedding_dict)
-        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
+        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X,*value_lists)
 
         sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze()
         linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze()
@@ -181,10 +189,18 @@ class DeepFM(BaseModel):
 
         return y_pred
 
-    def forward(self, X):
-
-        embedding_lists = self.get_embeddings(X)
+    def use_one_hot_values(self, X, value_lists):
+        embedding_lists = self.get_embeddings(X, value_lists=value_lists)
 
         y_pred = self.use_embeddings(embedding_lists)
+        return y_pred
+
+    def forward(self, X):
+
+        # embedding_lists = self.get_embeddings(X)
+        # y_pred = self.use_embeddings(embedding_lists)
+
+        value_lists = self.get_one_hot_values(X)
+        y_pred = self.use_one_hot_values(X,value_lists)
 
         return y_pred

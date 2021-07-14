@@ -10,7 +10,7 @@ from itertools import chain
 import torch
 import torch.nn as nn
 import numpy as np
-
+import torch.nn.functional as F
 from .layers.sequence import SequencePoolingLayer
 from .layers.utils import concat_fun
 
@@ -166,6 +166,7 @@ def get_varlen_pooling_list(embedding_dict, features, feature_index, varlen_spar
             emb = SequencePoolingLayer(mode=feat.combiner, supports_masking=False, device=device)(
                 [seq_emb, seq_length])
         varlen_sparse_embedding_list.append(emb)
+        varlen_sparse_embedding_list = [emb.squeeze(dim=1) for emb in varlen_sparse_embedding_list]
     return varlen_sparse_embedding_list
 
 
@@ -179,7 +180,7 @@ def create_embedding_matrix(feature_columns, init_std=0.0001, linear=False, spar
         filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if len(feature_columns) else []
 
     embedding_dict = nn.ModuleDict(
-        {feat.embedding_name: nn.Embedding(feat.vocabulary_size, feat.embedding_dim if not linear else 1, sparse=sparse)
+        {feat.embedding_name: nn.Linear(feat.vocabulary_size, feat.embedding_dim if not linear else 1)
          for feat in
          sparse_feature_columns + varlen_sparse_feature_columns}
     )
@@ -224,19 +225,19 @@ def embedding_lookup(X, sparse_embedding_dict, sparse_input_dict, sparse_feature
     return group_embedding_dict
 
 
-def varlen_embedding_lookup(X, embedding_dict, sequence_input_dict, varlen_sparse_feature_columns):
+def varlen_embedding_lookup(var_len_sparse_value_list, embedding_dict, sequence_input_dict, varlen_sparse_feature_columns):
     varlen_embedding_vec_dict = {}
-    for fc in varlen_sparse_feature_columns:
+    for i,fc in enumerate(varlen_sparse_feature_columns):
         feature_name = fc.name
         embedding_name = fc.embedding_name
-        if fc.use_hash:
-            # lookup_idx = Hash(fc.vocabulary_size, mask_zero=True)(sequence_input_dict[feature_name])
-            # TODO: add hash function
-            lookup_idx = sequence_input_dict[feature_name]
-        else:
-            lookup_idx = sequence_input_dict[feature_name]
+        # if fc.use_hash:
+        #     # lookup_idx = Hash(fc.vocabulary_size, mask_zero=True)(sequence_input_dict[feature_name])
+        #     # TODO: add hash function
+        #     lookup_idx = sequence_input_dict[feature_name]
+        # else:
+        #     lookup_idx = sequence_input_dict[feature_name]
         varlen_embedding_vec_dict[feature_name] = embedding_dict[embedding_name](
-            X[:, lookup_idx[0]:lookup_idx[1]].long())  # (lookup_idx)
+            var_len_sparse_value_list[i])  # (lookup_idx)
 
     return varlen_embedding_vec_dict
 

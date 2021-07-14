@@ -57,7 +57,7 @@ class FGSM(Attack):
         else:
             model.eval()
 
-        original_embeddings = model.get_embeddings(samples, self.part_specified)
+        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified)
 
         adv_embeddings = apply2nestLists(lambda x: x.clone().detach().to(model.device), original_embeddings)
 

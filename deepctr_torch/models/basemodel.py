@@ -60,15 +60,27 @@ class Linear(nn.Module):
                 device))
             torch.nn.init.normal_(self.weight, mean=0, std=init_std)
 
-    def input_from_feature_columns(self, X):
-        sparse_embedding_list = [self.embedding_dict[feat.embedding_name](
-            X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].long()) for
+    def one_hot_value_from_feature_columns(self, X):
+        sparse_value_list = [
+            F.one_hot(X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].to(torch.int64),
+                      num_classes=feat.vocabulary_size).squeeze(dim=1).float() for
             feat in self.sparse_feature_columns]
-
+        var_len_sparse_value_list = [
+            F.one_hot(X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].to(torch.int64),
+                      num_classes=feat.vocabulary_size).squeeze(dim=1).float() for
+            feat in self.varlen_sparse_feature_columns
+        ]
         dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
                             self.dense_feature_columns]
+        return dense_value_list, sparse_value_list, var_len_sparse_value_list
 
-        sequence_embed_dict = varlen_embedding_lookup(X, self.embedding_dict, self.feature_index,
+    def input_from_feature_columns(self, X, dense_value_list, sparse_value_list, var_len_sparse_value_list):
+
+        sparse_embedding_list = [self.embedding_dict[feat.embedding_name](sparse_value_list[i]) for
+                                 i, feat in enumerate(self.sparse_feature_columns)]
+
+        sequence_embed_dict = varlen_embedding_lookup(var_len_sparse_value_list, self.embedding_dict,
+                                                      self.feature_index,
                                                       self.varlen_sparse_feature_columns)
         varlen_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
                                                         self.varlen_sparse_feature_columns, self.device)
@@ -93,7 +105,11 @@ class Linear(nn.Module):
 
     def forward(self, X, sparse_feat_refine_weight=None):
 
-        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X)
+        dense_value_list, sparse_value_list, var_len_sparse_value_list = self.one_hot_value_from_feature_columns(X)
+
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, dense_value_list,
+                                                                                  sparse_value_list,
+                                                                                  var_len_sparse_value_list)
 
         linear_logit = self.use_embeddings(sparse_embedding_list, dense_value_list, sparse_feat_refine_weight)
 
@@ -158,7 +174,7 @@ class BaseModel(nn.Module):
         :param validation_data: tuple `(x_val, y_val)` or tuple `(x_val, y_val, val_sample_weights)` on which to evaluate the loss and any model metrics at the end of each epoch. The model will not be trained on this data. `validation_data` will override `validation_split`.
         :param shuffle: Boolean. Whether to shuffle the order of the batches at the beginning of each epoch.
         :param callbacks: List of `deepctr_torch.callbacks.Callback` instances. List of callbacks to apply during training and validation (if ). See [callbacks](https://tensorflow.google.cn/api_docs/python/tf/keras/callbacks). Now available: `EarlyStopping` , `ModelCheckpoint`
-        :param adv_type: `None` or str in [normal, free, free_lb, trades]. Whether to use adv training or not, and the type of adv train.
+        :param adv_type: `None` or str in [normal, free, free_lb, trades, one_class]. Whether to use adv training or not, and the type of adv train.
         :param attacker: Attack object. Perform adversarial attack in adv training.
         :param lam: Float. Proportion between adv and origin samples in adv training.
         :param normalized_attack: Int. 0, 1. Whether to normalize attack. 0 = False. 1 = Normalize according to the whole training data.
@@ -289,7 +305,8 @@ class BaseModel(nn.Module):
                                             var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
                                                                        original_embeddings)
                                         noise_batch = denormalize_data(noise_batch, var_list)
-                                        noise_batch = apply2nestLists(lambda x:Variable(x, requires_grad=True).to(self.device),noise_batch)
+                                        noise_batch = apply2nestLists(
+                                            lambda x: Variable(x, requires_grad=True).to(self.device), noise_batch)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(adv_embeddings).squeeze()
                                     adv_loss = loss_func(adv_pred, y.squeeze(), reduction='sum')
@@ -350,7 +367,8 @@ class BaseModel(nn.Module):
                                             var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
                                                                        original_embeddings)
                                         noise_batch = denormalize_data(noise_batch, var_list)
-                                        noise_batch = apply2nestLists(lambda x:Variable(x, requires_grad=True).to(self.device),noise_batch)
+                                        noise_batch = apply2nestLists(
+                                            lambda x: Variable(x, requires_grad=True).to(self.device), noise_batch)
                                     adv_embeddings = add_nestLists(original_embeddings, noise_batch)
                                     adv_pred = model.use_embeddings(adv_embeddings).squeeze()
                                     reg_loss = self.get_regularization_loss()
@@ -385,7 +403,8 @@ class BaseModel(nn.Module):
                                     var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
                                     attacker.set_bias(var_list)
                                 if normalized_attack == 2:
-                                    var_list = apply2nestLists(lambda x: torch.var(x.detach(),dim=0), original_embeddings)
+                                    var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                               original_embeddings)
                                     attacker.set_bias(var_list)
                                 deltas = attacker(x, y, model)
                                 adv_embeddings = add_nestLists(original_embeddings, deltas)
@@ -407,7 +426,33 @@ class BaseModel(nn.Module):
 
                                 attacker.set_trades_mode(False)
 
-                            elif adv_type not in ['normal', 'free', 'free_lb', 'free_new', 'trades']:
+                            elif adv_type == 'one_class':
+                                if attacker.attack != 'ONE_CLASS':
+                                    raise ValueError(
+                                        'An \'ONE_CLASS\' attacker should be implemented for the one_class adv training')
+                                # prediction on original sample
+                                optim.zero_grad()
+                                value_lists = model.get_one_hot_values(x)
+                                y_pred = model.use_one_hot_values(x, value_lists)
+                                loss = loss_func(y_pred.squeeze(), y.squeeze(), reduction='sum')
+
+                                # prediction on adv sample
+
+                                adv_value_lists = attacker(x, y, model, value_lists=value_lists)
+                                adv_pred = model.use_one_hot_values(x, adv_value_lists)
+                                adv_loss = loss_func(adv_pred.squeeze(), y.squeeze(), reduction='sum')
+
+                                y_pred = y_pred.squeeze()
+                                adv_pred = adv_pred.squeeze()
+                                reg_loss = self.get_regularization_loss()
+                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
+
+                                loss_epoch += loss.item()
+                                total_loss_epoch += total_loss.item()
+                                total_loss.backward()
+                                optim.step()
+
+                            elif adv_type not in ['normal', 'free', 'free_lb', 'free_new', 'trades', 'one_class']:
                                 raise NotImplementedError(
                                     f'adversarial training type not defined: {adv_type}, should be within' +
                                     f'["normal","free","free_lb","free_new", "trades"]')
@@ -574,19 +619,24 @@ class BaseModel(nn.Module):
         test_loader = DataLoader(
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
-        distortion_sum = 0.0
+        distortion_sum = torch.tensor([0]).to(self.device).float()
         pred_ans = []
         with torch.no_grad():
             for x, label in test_loader:
                 x, label = x.to(self.device).float(), label.to(self.device).float()
-                original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
+                if attacker.attack != 'ONE_CLASS':
+                    original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
 
-                with torch.enable_grad():
-                    deltas = attacker(x, label, model)
-                adv_embeddings = add_nestLists(original_embeddings, deltas)
-                distortion_sum += get_rmse(deltas)
-
-                pred_an = model.use_embeddings(adv_embeddings)
+                    with torch.enable_grad():
+                        deltas = attacker(x, label, model)
+                    adv_embeddings = add_nestLists(original_embeddings, deltas)
+                    distortion_sum += get_rmse(deltas)
+                    pred_an = model.use_embeddings(adv_embeddings)
+                else:
+                    value_lists = model.get_one_hot_values(x)
+                    with torch.enable_grad():
+                        adv_value_lists = attacker(x,label,model,value_lists=value_lists)
+                    pred_an = model.use_one_hot_values(x, adv_value_lists)
                 pred_ans.append(pred_an.cpu().data.numpy())
         pred_ans = np.concatenate(pred_ans).astype("float64")
         distortion = distortion_sum / len(test_loader)
@@ -652,8 +702,7 @@ class BaseModel(nn.Module):
 
         return sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size
 
-    def input_from_feature_columns(self, X, feature_columns, embedding_dict, support_dense=True):
-
+    def one_hot_value_from_feature_columns(self, X, feature_columns, support_dense=True):
         sparse_feature_columns = list(
             filter(lambda x: isinstance(x, SparseFeat), feature_columns)) if len(feature_columns) else []
         dense_feature_columns = list(
@@ -666,17 +715,38 @@ class BaseModel(nn.Module):
             raise ValueError(
                 "DenseFeat is not supported in dnn_feature_columns")
 
-        sparse_embedding_list = [embedding_dict[feat.embedding_name](
-            X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].long()) for
-            feat in sparse_feature_columns]
+        sparse_value_list = [
+            F.one_hot(X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].to(torch.int64),
+                      num_classes=feat.vocabulary_size).squeeze(dim=1).float() for feat in sparse_feature_columns]
 
-        sequence_embed_dict = varlen_embedding_lookup(X, self.embedding_dict, self.feature_index,
-                                                      varlen_sparse_feature_columns)
-        varlen_sparse_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
-                                                               varlen_sparse_feature_columns, self.device)
+        var_len_sparse_value_list = [
+            F.one_hot(X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].to(torch.int64),
+                      num_classes=feat.vocabulary_size).squeeze(dim=1).float() for feat in varlen_sparse_feature_columns
+        ]
 
         dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
                             dense_feature_columns]
+
+        return dense_value_list, sparse_value_list, var_len_sparse_value_list
+
+    def input_from_feature_columns(self, dense_value_list, sparse_value_list, var_len_sparse_value_list, X,
+                                   feature_columns, embedding_dict, support_dense=True):
+        sparse_feature_columns = list(
+            filter(lambda x: isinstance(x, SparseFeat), feature_columns)) if len(feature_columns) else []
+        dense_feature_columns = list(
+            filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if len(feature_columns) else []
+
+        varlen_sparse_feature_columns = list(
+            filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if feature_columns else []
+
+        sparse_embedding_list = [embedding_dict[feat.embedding_name](sparse_value_list[i]) for
+                                 i, feat in enumerate(sparse_feature_columns)]
+
+        sequence_embed_dict = varlen_embedding_lookup(var_len_sparse_value_list, self.embedding_dict,
+                                                      self.feature_index,
+                                                      varlen_sparse_feature_columns)
+        varlen_sparse_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
+                                                               varlen_sparse_feature_columns, self.device)
 
         return sparse_embedding_list + varlen_sparse_embedding_list, dense_value_list
 

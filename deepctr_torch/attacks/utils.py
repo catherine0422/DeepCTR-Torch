@@ -18,6 +18,13 @@ def apply2nestLists(f, xs):
         return [check_None(f, x) for x in xs]
 
 
+def apply2nestLists_2layer(f, xs, needZip = False):
+    if needZip:
+      return [[check_None(f, x2, multi_arg=True) for x2 in zip(*x1)] for x1 in zip(*xs)]
+    else:
+      return [[check_None(f, x2) for x2 in x1] for x1 in xs]
+
+
 def delta_step(grads, eps, need_get_grad = False):
     if need_get_grad:
         f = lambda x,y: (x*y.grad.sign()).detach()

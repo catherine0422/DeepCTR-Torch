@@ -74,7 +74,7 @@ class PGD(Attack):
         else:
             model.eval()
 
-        original_embeddings = model.get_embeddings(samples, self.part_specified)
+        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified)
 
         if self.trades:
             pred = model.use_embeddings(original_embeddings)

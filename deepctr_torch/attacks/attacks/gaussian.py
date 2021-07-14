@@ -41,7 +41,7 @@ class GAUSSIAN(Attack):
         else:
             model.eval()
 
-        original_embeddings = model.get_embeddings(samples, self.part_specified)
+        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified)
         f = lambda x,y: torch.normal(mean=0, std=x, size=y.size()).to(model.device)
         deltas = func_detect_arg_type(f,self.eps,original_embeddings)
         if self.biased:
