@@ -59,7 +59,7 @@ class DeepFM(BaseModel):
             self.fm = FM()
 
         if self.use_dnn:
-            self.dnn = DNN(self.compute_input_dim(dnn_feature_columns), dnn_hidden_units,
+            self.dnn = DNN(self.compute_input_dim(), dnn_hidden_units,
                            activation=dnn_activation, l2_reg=l2_reg_dnn, dropout_rate=dnn_dropout, use_bn=dnn_use_bn,
                            init_std=init_std, device=device)
             self.dnn_linear = nn.Linear(
@@ -71,8 +71,7 @@ class DeepFM(BaseModel):
 
         if self.emb_use_bn or self.emb_use_bn_simple:
             affine = not self.emb_use_bn_simple
-            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
-                dnn_feature_columns)
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns()
             self.emb_bn_sparse = nn.BatchNorm1d(sparse_emb_size, affine=affine) if sparse_emb_size > 0 else None
             self.emb_bn_linear_sparse = nn.BatchNorm1d(linear_sparse_emb_size,
                                                        affine=affine) if linear_sparse_emb_size > 0 else None
@@ -81,8 +80,7 @@ class DeepFM(BaseModel):
 
         if self.ln > 0:
             elementwise_affine = True if self.ln > 1 else False
-            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
-                dnn_feature_columns)
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns()
             self.ln_sparse = nn.LayerNorm(sparse_emb_size,
                                           elementwise_affine=elementwise_affine) if sparse_emb_size > 0 else None
             self.ln_linear_sparse = nn.LayerNorm(linear_sparse_emb_size,
@@ -92,8 +90,7 @@ class DeepFM(BaseModel):
 
         if self.ln_part_specified > 0:
             elementwise_affine = True if self.ln_part_specified > 1 else False
-            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns(
-                dnn_feature_columns)
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns()
             self.ln_sparse_dnn = nn.LayerNorm(sparse_emb_size,
                                               elementwise_affine=elementwise_affine) if sparse_emb_size > 0 else None
             self.ln_sparse_fm = nn.LayerNorm(self.embedding_size,
@@ -106,20 +103,18 @@ class DeepFM(BaseModel):
         self.to(device)
 
     def get_one_hot_values(self, X):
-        dense_value_list, sparse_value_list, var_len_sparse_value_list = self.one_hot_value_from_feature_columns(X,
-                                                                                                                 self.dnn_feature_columns)
+        dense_value_list, sparse_value_list, var_len_sparse_value_list = self.one_hot_value_from_feature_columns(X)
         return dense_value_list, sparse_value_list, var_len_sparse_value_list
 
     def get_embeddings(self, X, value_lists=None, part_specified=False):
         if value_lists is None:
             value_lists = self.get_one_hot_values(X)
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(*value_lists, X,
-                                                                                  self.dnn_feature_columns,
                                                                                   self.embedding_dict)
         linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X,*value_lists)
 
-        sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze()
-        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze()
+        sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1)
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1)
         dense_value_tensor = concat_fun(dense_value_list)
 
         if self.emb_use_bn or self.emb_use_bn_simple:

@@ -123,6 +123,27 @@ def build_input_features(feature_columns):
     return features
 
 
+def build_input_values_index(dense_feature_columns, sparse_feature_columns, varlen_sparse_feature_columns):
+    # Return OrderedDict: {feature_name:(start_index, end_index, type_index, tensor_index)}
+    # types: [dense value, sprase value, var lens sparse value]
+
+    features = OrderedDict()
+
+    start = 0
+    TYPE_DENSE, TYPE_SPARSE, TYPE_VAR_SPARSE = 0,1,2
+    for i,feat in enumerate(dense_feature_columns):
+        features[feat.name] = (start, start + feat.dimension, TYPE_DENSE, i)
+        start += feat.dimension
+    for i, feat in enumerate(sparse_feature_columns):
+        features[feat.name] = (start, start + feat.vocabulary_size, TYPE_SPARSE, i)
+        start += feat.vocabulary_size
+    for i, feat in enumerate(varlen_sparse_feature_columns):
+        features[feat.name] = (start, start + feat.maxlen*feat.vocabulary_size, TYPE_VAR_SPARSE, i)
+        start += feat.maxlen*feat.vocabulary_size
+
+    return features
+
+
 def combined_dnn_input(sparse_embedding_list, dense_value_list):
     if len(sparse_embedding_list) > 0 and len(dense_value_list) > 0:
         sparse_dnn_input = torch.flatten(
@@ -166,7 +187,6 @@ def get_varlen_pooling_list(embedding_dict, features, feature_index, varlen_spar
             emb = SequencePoolingLayer(mode=feat.combiner, supports_masking=False, device=device)(
                 [seq_emb, seq_length])
         varlen_sparse_embedding_list.append(emb)
-        varlen_sparse_embedding_list = [emb.squeeze(dim=1) for emb in varlen_sparse_embedding_list]
     return varlen_sparse_embedding_list
 
 

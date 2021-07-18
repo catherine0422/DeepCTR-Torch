@@ -1,9 +1,14 @@
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from tensorflow.python.keras.preprocessing.sequence import pad_sequences
 
+from deepctr_torch.attacks.attacks.fgsm import FGSM
+from deepctr_torch.attacks.attacks.gaussian import GAUSSIAN
+from deepctr_torch.attacks.attacks.one_class import ONE_CLASS
+from deepctr_torch.attacks.attacks.pgd import PGD
 from deepctr_torch.inputs import SparseFeat, VarLenSparseFeat, get_feature_names
 from deepctr_torch.models import *
 
@@ -63,8 +68,13 @@ if __name__ == "__main__":
     feature_names = get_feature_names(linear_feature_columns + dnn_feature_columns)
 
     # 3.generate input data for model
-    model_input = {name: data[name] for name in sparse_features}  #
-    model_input["genres"] = genres_list
+    data['genres'] = genres_list.tolist()
+    train, test = train_test_split(data, test_size=0.2, random_state=2020)
+    train_model_input = {name: train[name] for name in feature_names}
+    test_model_input = {name: test[name] for name in feature_names}
+    train_model_input['genres'] = np.stack(train_model_input['genres'].values)
+    test_model_input['genres'] = np.stack(test_model_input['genres'].values)
+    validate_data = (test_model_input,test[target].values)
 
     # 4.Define Model,compile and train
 
@@ -74,10 +84,40 @@ if __name__ == "__main__":
         print('cuda ready...')
         device = 'cuda:0'
 
-    # model = DeepFM(linear_feature_columns, dnn_feature_columns, task='binary', device=device)
-    model = PNN(dnn_feature_columns, task='binary', device=device)
+    model = DeepFM(linear_feature_columns, dnn_feature_columns, task='binary', device=device)
 
     model.compile("adam", "binary_crossentropy",
                   metrics=["binary_crossentropy", "auc"],)
-    history = model.fit(model_input, data[target].values, batch_size=256, epochs=10, verbose=2, validation_split=0.2)
+
+    attacker = ONE_CLASS(mask=[(1,0),(1,1)])
+    # attacker = PGD(eps=0.1)
+    history,idx_count = model.fit(train_model_input, train[target].values, batch_size=32, epochs=10, verbose=2,
+                        validation_data=validate_data, adv_type='normal',attacker=attacker,count=True)
+    torch.save(model,'movie_model.pth')
+    # model = torch.load('movie_model.pth')
+    # eps = 40
+    # var_list = model.compute_full_emb_var(test_model_input)
+    # attacker = ONE_CLASS()
+    # attacker.set_bias(var_list)
+
+    res,idx_count = model.adv_attack(train_model_input, train[target].values, attacker,verbose=True,count=True)
+    print(idx_count)
+    #
+    # attacker = FGSM(eps=eps)
+    # attacker.set_bias(var_list)
+    # res = model.adv_attack(test_model_input,test[target].values,attacker,verbose=True)
+    #
+    # attacker = GAUSSIAN(eps=eps)
+    # attacker.set_bias(var_list)
+    # res = model.adv_attack(test_model_input,test[target].values,attacker,verbose=True)
+    #
+    # attacker = PGD(eps=eps,steps=10)
+    # res = model.adv_attack(test_model_input,test[target].values,attacker,verbose=True)
+    #
+    # attacker = FGSM(eps=eps)
+    # res = model.adv_attack(test_model_input,test[target].values,attacker,verbose=True)
+    #
+    # attacker = GAUSSIAN(eps=eps)
+    # res = model.adv_attack(test_model_input,test[target].values,attacker,verbose=True)
+
 

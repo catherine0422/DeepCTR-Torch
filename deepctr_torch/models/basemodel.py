@@ -8,6 +8,8 @@ Author:
 from __future__ import print_function
 
 import time
+from collections import OrderedDict
+
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,12 +25,13 @@ except ImportError:
     from tensorflow.python.keras._impl.keras.callbacks import CallbackList
 
 from ..inputs import build_input_features, SparseFeat, DenseFeat, VarLenSparseFeat, get_varlen_pooling_list, \
-    create_embedding_matrix, varlen_embedding_lookup
+    create_embedding_matrix, varlen_embedding_lookup, build_input_values_index
 from ..layers import PredictionLayer
 from ..layers.utils import slice_arrays
 from ..callbacks import History
 from ..attacks.utils import *
 from ..attacks import FGSM
+from ..datasets import NpyDataset
 
 
 class Linear(nn.Module):
@@ -90,7 +93,8 @@ class Linear(nn.Module):
         return sparse_embedding_list, dense_value_list
 
     def use_embeddings(self, sparse_embedding_cat, dense_value_cat, sparse_feat_refine_weight=None):
-        linear_logit = torch.tensor([0]).to(self.device)
+        device = sparse_embedding_cat.device if sparse_embedding_cat is not None else dense_value_cat.device
+        linear_logit = torch.tensor([0]).to(sparse_embedding_cat.device)
         if sparse_embedding_cat is not None:
             if sparse_feat_refine_weight is not None:
                 # w_{x,i}=m_{x,i} * w_i (in IFM and DIFM)
@@ -158,9 +162,20 @@ class BaseModel(nn.Module):
         self._ckpt_saved_epoch = False  # used for EarlyStopping in tf1.14
         self.history = History()
 
+        self.sparse_feature_columns = list(
+            filter(lambda x: isinstance(x, SparseFeat), dnn_feature_columns)) if len(dnn_feature_columns) else []
+        self.dense_feature_columns = list(
+            filter(lambda x: isinstance(x, DenseFeat), dnn_feature_columns)) if len(dnn_feature_columns) else []
+        self.varlen_sparse_feature_columns = list(
+            filter(lambda x: isinstance(x, VarLenSparseFeat), dnn_feature_columns)) if dnn_feature_columns else []
+
+        self.flatten_value_index = build_input_values_index(self.dense_feature_columns, self.sparse_feature_columns,
+                                                            self.varlen_sparse_feature_columns)
+        self.embedding_size = self.get_embedding_size()
+
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
             validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1,
-            normalized_attack=0, eval_batch_size=256):
+            normalized_attack=0, eval_batch_size=256, count=False):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -174,13 +189,17 @@ class BaseModel(nn.Module):
         :param validation_data: tuple `(x_val, y_val)` or tuple `(x_val, y_val, val_sample_weights)` on which to evaluate the loss and any model metrics at the end of each epoch. The model will not be trained on this data. `validation_data` will override `validation_split`.
         :param shuffle: Boolean. Whether to shuffle the order of the batches at the beginning of each epoch.
         :param callbacks: List of `deepctr_torch.callbacks.Callback` instances. List of callbacks to apply during training and validation (if ). See [callbacks](https://tensorflow.google.cn/api_docs/python/tf/keras/callbacks). Now available: `EarlyStopping` , `ModelCheckpoint`
-        :param adv_type: `None` or str in [normal, free, free_lb, trades, one_class]. Whether to use adv training or not, and the type of adv train.
+        :param adv_type: `None` or str in [normal, free, free_lb, trades]. Whether to use adv training or not, and the type of adv train.
         :param attacker: Attack object. Perform adversarial attack in adv training.
         :param lam: Float. Proportion between adv and origin samples in adv training.
         :param normalized_attack: Int. 0, 1. Whether to normalize attack. 0 = False. 1 = Normalize according to the whole training data.
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
+        if count and (attacker.attack != 'ONE_CLASS' or adv_type != 'normal'):
+            raise ValueError('Count is only implemented under one class attack, current attacker type is: ',
+                             attacker.attack, ', adv type is: ', adv_type)
+
         x_full = x
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
@@ -214,7 +233,6 @@ class BaseModel(nn.Module):
                         slice_arrays(x, split_at))
             y, val_y = (slice_arrays(y, 0, split_at),
                         slice_arrays(y, split_at))
-
         else:
             val_x = []
             val_y = []
@@ -261,6 +279,7 @@ class BaseModel(nn.Module):
             len(train_tensor_data), len(val_y), steps_per_epoch))
         if adv_type is not None and adv_type in ['free', 'free_new']:
             global_noise_data = []
+        total_max_idx_count = {}
         for epoch in range(initial_epoch, epochs):
             callbacks.on_epoch_begin(epoch)
             epoch_logs = {}
@@ -391,24 +410,35 @@ class BaseModel(nn.Module):
                             elif adv_type in ['normal', 'trades']:
                                 # prediction on original sample
                                 optim.zero_grad()
-                                y_pred = model(x)
+                                value_lists = model.get_one_hot_values(x)
+                                y_pred = model.use_one_hot_values(x, value_lists)
                                 loss = loss_func(y_pred.squeeze(), y.squeeze(), reduction='sum')
 
                                 # prediction on adv sample
                                 adv_loss = 0
-                                original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
                                 if adv_type == 'trades':
                                     attacker.set_trades_mode(True)
-                                if normalized_attack == 1:
-                                    var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
-                                    attacker.set_bias(var_list)
-                                if normalized_attack == 2:
-                                    var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
-                                                               original_embeddings)
-                                    attacker.set_bias(var_list)
-                                deltas = attacker(x, y, model)
-                                adv_embeddings = add_nestLists(original_embeddings, deltas)
-                                adv_pred = model.use_embeddings(adv_embeddings)
+                                if attacker.attack == 'ONE_CLASS':
+                                    if count:
+                                        adv_value_lists, max_idx_count = attacker(x, y, model, value_lists=value_lists,
+                                                                                  count=count)
+                                        total_max_idx_count = append_counts(total_max_idx_count, max_idx_count)
+                                    else:
+                                        adv_value_lists = attacker(x, y, model, value_lists=value_lists)
+                                    adv_pred = model.use_one_hot_values(x, adv_value_lists)
+                                else:
+                                    original_embeddings = model.get_embeddings(x,
+                                                                               part_specified=attacker.part_specified)
+                                    if normalized_attack == 1:
+                                        var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
+                                        attacker.set_bias(var_list)
+                                    if normalized_attack == 2:
+                                        var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                                   original_embeddings)
+                                        attacker.set_bias(var_list)
+                                    deltas = attacker(x, y, model)
+                                    adv_embeddings = add_nestLists(original_embeddings, deltas)
+                                    adv_pred = model.use_embeddings(adv_embeddings)
                                 if adv_type == 'normal':
                                     adv_loss = loss_func(adv_pred.squeeze(), y.squeeze(), reduction='sum')
                                 elif adv_type == 'trades':
@@ -426,33 +456,7 @@ class BaseModel(nn.Module):
 
                                 attacker.set_trades_mode(False)
 
-                            elif adv_type == 'one_class':
-                                if attacker.attack != 'ONE_CLASS':
-                                    raise ValueError(
-                                        'An \'ONE_CLASS\' attacker should be implemented for the one_class adv training')
-                                # prediction on original sample
-                                optim.zero_grad()
-                                value_lists = model.get_one_hot_values(x)
-                                y_pred = model.use_one_hot_values(x, value_lists)
-                                loss = loss_func(y_pred.squeeze(), y.squeeze(), reduction='sum')
-
-                                # prediction on adv sample
-
-                                adv_value_lists = attacker(x, y, model, value_lists=value_lists)
-                                adv_pred = model.use_one_hot_values(x, adv_value_lists)
-                                adv_loss = loss_func(adv_pred.squeeze(), y.squeeze(), reduction='sum')
-
-                                y_pred = y_pred.squeeze()
-                                adv_pred = adv_pred.squeeze()
-                                reg_loss = self.get_regularization_loss()
-                                total_loss = loss + reg_loss + self.aux_loss + lam * adv_loss
-
-                                loss_epoch += loss.item()
-                                total_loss_epoch += total_loss.item()
-                                total_loss.backward()
-                                optim.step()
-
-                            elif adv_type not in ['normal', 'free', 'free_lb', 'free_new', 'trades', 'one_class']:
+                            elif adv_type not in ['normal', 'free', 'free_lb', 'free_new', 'trades']:
                                 raise NotImplementedError(
                                     f'adversarial training type not defined: {adv_type}, should be within' +
                                     f'["normal","free","free_lb","free_new", "trades"]')
@@ -535,8 +539,10 @@ class BaseModel(nn.Module):
                 break
 
         callbacks.on_train_end()
-
-        return self.history
+        if count:
+            return self.history,total_max_idx_count
+        else:
+            return self.history
 
     def evaluate(self, x, y, batch_size=256):
         """
@@ -581,7 +587,7 @@ class BaseModel(nn.Module):
 
         return np.concatenate(pred_ans).astype("float64")
 
-    def adv_attack(self, x, y, attacker, verbose=False, batch_size=256):
+    def adv_attack(self, x, y, attacker, verbose=False, batch_size=256, count=False):
         r""" Apply adversarial attack on the data x, and return evaluations of the model under attack
 
         :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
@@ -589,8 +595,10 @@ class BaseModel(nn.Module):
         :param attacker: Attack object.
         :return: dict of evaluations
         """
-
-        pred_ans, distortion = self.adv_pred(x, y, attacker, batch_size=batch_size)
+        if count and attacker.attack != 'ONE_CLASS':
+            raise ValueError('Count should by compared with an one class attak, current attacker type is:',
+                             attacker.attack)
+        pred_ans, distortion, max_idx_count = self.adv_pred(x, y, attacker, batch_size=batch_size, count=count)
 
         eval_result = {}
         for name, metric_fun in self.metrics.items():
@@ -603,9 +611,12 @@ class BaseModel(nn.Module):
                 eval_str += f'{k} = {v:.6f}, ' if type(v) != str else f'{k} = {v}, '
             eval_str += 'attack = ' + str(attacker)
             print(eval_str)
-        return eval_result
+        if count:
+            return eval_result, max_idx_count
+        else:
+            return eval_result
 
-    def adv_pred(self, x, y, attacker, batch_size=256):
+    def adv_pred(self, x, y, attacker, batch_size=256, count=False):
         model = self.eval()
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
@@ -621,6 +632,7 @@ class BaseModel(nn.Module):
 
         distortion_sum = torch.tensor([0]).to(self.device).float()
         pred_ans = []
+        total_max_idx_count = {}
         with torch.no_grad():
             for x, label in test_loader:
                 x, label = x.to(self.device).float(), label.to(self.device).float()
@@ -634,13 +646,19 @@ class BaseModel(nn.Module):
                     pred_an = model.use_embeddings(adv_embeddings)
                 else:
                     value_lists = model.get_one_hot_values(x)
-                    with torch.enable_grad():
-                        adv_value_lists = attacker(x,label,model,value_lists=value_lists)
+                    if count:
+                        with torch.enable_grad():
+                            adv_value_lists, max_idx_count = attacker(x, label, model, value_lists=value_lists,
+                                                                      count=count)
+                        total_max_idx_count = append_counts(total_max_idx_count, max_idx_count)
+                    else:
+                        with torch.enable_grad():
+                            adv_value_lists = attacker(x, label, model, value_lists=value_lists)
                     pred_an = model.use_one_hot_values(x, adv_value_lists)
                 pred_ans.append(pred_an.cpu().data.numpy())
         pred_ans = np.concatenate(pred_ans).astype("float64")
         distortion = distortion_sum / len(test_loader)
-        return pred_ans, distortion
+        return pred_ans, distortion, total_max_idx_count
 
     def get_full_emb_lists(self, x, batch_size=256, part_specified=False):
         r""" Calculate the scale of embeddings of x
@@ -689,12 +707,9 @@ class BaseModel(nn.Module):
         all_emb_var = apply2nestLists(lambda x: torch.tensor(np.var(x, axis=0)).to(self.device), all_emb_lists)
         return all_emb_var
 
-    def emb_size_list_from_feature_columns(self, feature_columns):
-        sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, SparseFeat) or isinstance(x, VarLenSparseFeat), feature_columns)) if len(
-            feature_columns) else []
-        dense_feature_columns = list(
-            filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if len(feature_columns) else []
+    def emb_size_list_from_feature_columns(self):
+        sparse_feature_columns = self.sparse_feature_columns + self.varlen_sparse_feature_columns
+        dense_feature_columns = self.dense_feature_columns
 
         sparse_emb_size = sum(feat.embedding_dim for feat in sparse_feature_columns)
         linear_sparse_emb_size = len(sparse_feature_columns)
@@ -702,60 +717,48 @@ class BaseModel(nn.Module):
 
         return sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size
 
-    def one_hot_value_from_feature_columns(self, X, feature_columns, support_dense=True):
-        sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, SparseFeat), feature_columns)) if len(feature_columns) else []
-        dense_feature_columns = list(
-            filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if len(feature_columns) else []
+    def one_hot_value_from_feature_columns(self, X, support_dense=True):
 
-        varlen_sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if feature_columns else []
-
-        if not support_dense and len(dense_feature_columns) > 0:
+        if not support_dense and len(self.dense_feature_columns) > 0:
             raise ValueError(
                 "DenseFeat is not supported in dnn_feature_columns")
 
         sparse_value_list = [
             F.one_hot(X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].to(torch.int64),
-                      num_classes=feat.vocabulary_size).squeeze(dim=1).float() for feat in sparse_feature_columns]
+                      num_classes=feat.vocabulary_size).float() for feat in self.sparse_feature_columns]
 
         var_len_sparse_value_list = [
             F.one_hot(X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].to(torch.int64),
-                      num_classes=feat.vocabulary_size).squeeze(dim=1).float() for feat in varlen_sparse_feature_columns
+                      num_classes=feat.vocabulary_size).float() for feat in self.varlen_sparse_feature_columns
         ]
 
         dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
-                            dense_feature_columns]
+                            self.dense_feature_columns]
 
         return dense_value_list, sparse_value_list, var_len_sparse_value_list
 
     def input_from_feature_columns(self, dense_value_list, sparse_value_list, var_len_sparse_value_list, X,
-                                   feature_columns, embedding_dict, support_dense=True):
-        sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, SparseFeat), feature_columns)) if len(feature_columns) else []
-        dense_feature_columns = list(
-            filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if len(feature_columns) else []
-
-        varlen_sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if feature_columns else []
+                                   embedding_dict):
 
         sparse_embedding_list = [embedding_dict[feat.embedding_name](sparse_value_list[i]) for
-                                 i, feat in enumerate(sparse_feature_columns)]
+                                 i, feat in enumerate(self.sparse_feature_columns)]
 
         sequence_embed_dict = varlen_embedding_lookup(var_len_sparse_value_list, self.embedding_dict,
                                                       self.feature_index,
-                                                      varlen_sparse_feature_columns)
+                                                      self.varlen_sparse_feature_columns)
         varlen_sparse_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
-                                                               varlen_sparse_feature_columns, self.device)
+                                                               self.varlen_sparse_feature_columns, self.device)
 
         return sparse_embedding_list + varlen_sparse_embedding_list, dense_value_list
 
-    def compute_input_dim(self, feature_columns, include_sparse=True, include_dense=True, feature_group=False):
-        sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, (SparseFeat, VarLenSparseFeat)), feature_columns)) if len(
-            feature_columns) else []
-        dense_feature_columns = list(
-            filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if len(feature_columns) else []
+    def unravel_flatten_value_index(self, index):
+        """
+        Unravel the index of the flatten input value into the [value type index, tensor index, position index]
+        """
+
+    def compute_input_dim(self, include_sparse=True, include_dense=True, feature_group=False):
+        sparse_feature_columns = self.sparse_feature_columns + self.varlen_sparse_feature_columns
+        dense_feature_columns = self.dense_feature_columns
 
         dense_input_dim = sum(
             map(lambda x: x.dimension, dense_feature_columns))
@@ -877,12 +880,8 @@ class BaseModel(nn.Module):
         # used for EarlyStopping in tf1.15
         return None
 
-    @property
-    def embedding_size(self, ):
-        feature_columns = self.dnn_feature_columns
-        sparse_feature_columns = list(
-            filter(lambda x: isinstance(x, (SparseFeat, VarLenSparseFeat)), feature_columns)) if len(
-            feature_columns) else []
+    def get_embedding_size(self, ):
+        sparse_feature_columns = self.sparse_feature_columns + self.varlen_sparse_feature_columns
         embedding_size_set = set([feat.embedding_dim for feat in sparse_feature_columns])
         if len(embedding_size_set) > 1:
             raise ValueError("embedding_dim of SparseFeat and VarlenSparseFeat must be same in this model!")

@@ -75,6 +75,18 @@ def add_nestLists(xs, ys):
         return bigs
 
 
+def flatten_grad_list(grad_list):
+    dense_list = torch.cat(grad_list[0], dim=-1) if len(grad_list[0]) > 0 else []
+    sparse_list =  torch.cat(grad_list[1], dim=-1).squeeze() if len(grad_list[1]) > 0 else []
+    varlen_list = [torch.flatten(x,start_dim=1) for x in grad_list[2]] if len(grad_list[2]) >0 else []
+    varlen_list = torch.cat(varlen_list, dim=-1) if len(varlen_list) > 0 else []
+    flatten_grad_tensor = [dense_list, sparse_list, varlen_list]
+    flatten_grad_tensor = [x for x in flatten_grad_tensor if len(x) > 0]
+    flatten_grad_tensor = torch.cat(flatten_grad_tensor, dim=1)
+    return flatten_grad_tensor
+
+
+
 def cat_nestLists(xss, dim=1):
     xs = [torch.cat(xs, dim=dim) for xs in xss if len(xs) > 0]
     x = torch.cat(xs, dim=dim)
@@ -118,3 +130,18 @@ def denormalize_data(datas, var_list, bias_eps = 1e-5):
 def normalize_data(datas, var_list, bias_eps = 1e-5):
     datas = apply2nestLists(lambda x, y: x / (torch.sqrt(y + bias_eps)), (datas, var_list))
     return datas
+
+def add_count(counts, k):
+    if k in counts.keys():
+        counts[k] += 1
+    else:
+        counts[k] = 1
+    return counts
+
+def append_counts(current_counts, new_counts):
+    for k in new_counts.keys():
+        if k in current_counts.keys():
+            current_counts[k] += new_counts[k]
+        else:
+            current_counts[k] = new_counts[k]
+    return current_counts

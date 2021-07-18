@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.utils.data as Data
 from torch.utils.data import DataLoader
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.metrics import log_loss, roc_auc_score,plot_roc_curve
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 
@@ -55,60 +55,56 @@ if __name__ == "__main__":
         print('cuda ready...')
         device = 'cuda:0'
 
-    attacker = PGD(eps=0.005, alpha=0.01/40, steps=40, random_start=True)
-    print('Normal training')
 
-    model = DeepFM(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
-                   task='binary',
-                   l2_reg_embedding=1e-5, device=device)
-
-    model.compile("adam", "binary_crossentropy",
-                  metrics=["binary_crossentropy", "auc"], )
-
-
-    history = model.fit(train_model_input, train[target].values, batch_size=32, epochs=10, verbose=1,
-                        adv=False, validation_data=(test_model_input, test[target].values))
-    eval = model.evaluate(test_model_input, test[target].values)
-    print(eval)
-    adv_eval = model.adv_attack(test_model_input, test[target].values, attacker)
-    print(adv_eval)
-
-    fgsm_attacker = FGSM(eps=0.005)
-    adv_eval = model.adv_attack(test_model_input, test[target].values, fgsm_attacker)
-    print(adv_eval)
-    print()
-
-    # print('Adver training')
     # model = DeepFM(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
     #                task='binary',
     #                l2_reg_embedding=1e-5, device=device)
     #
-    # model.compile("adagrad", "binary_crossentropy",
+    # model.compile("adam", "binary_crossentropy",
     #               metrics=["binary_crossentropy", "auc"], )
     #
-    # history = model.fit(train_model_input, train[target].values, batch_size=32, epochs=10, verbose=1,
-    #                     adv=True, validation_data=(test_model_input, test[target].values))
-    # eval = model.evaluate(test_model_input, test[target].values)
-    # print(eval)
-    # adv_eval = model.adv_attack(test_model_input, test[target].values, attacker)
-    # print(adv_eval)
+    #
+    # history = model.fit(train_model_input, train[target].values, batch_size=64, epochs=10, verbose=2,
+    #                     adv_type=None, validation_data=(test_model_input, test[target].values))
+    #
+    # torch.save(model, 'model.pth')
 
-    # y = train[target].values
-    # x = train_model_input
-    # if isinstance(x, dict):
-    #     x = [x[feature] for feature in x.keys()]
-    # for i in range(len(x)):
-    #     if len(x[i].shape) == 1:
-    #         x[i] = np.expand_dims(x[i], axis=1)
-    # x = np.concatenate(x, axis=-1)
-    # train_tensor_data = Data.TensorDataset(
-    #     torch.from_numpy(x),
-    #     torch.from_numpy(y))
-    # train_loader = DataLoader(dataset=train_tensor_data, shuffle=True, batch_size=256)
+    model = torch.load('model.pth')
+    eval_attacker = FGSM(eps=0.01)
+    eval = model.evaluate(test_model_input, test[target].values)
+    print(eval)
     #
-    # it = iter(train_loader)
-    # x_train, y_train = next(it)
-    # x_train, y_train = x_train.to(device).float(), y_train.to(device).float()
+    adv_eval = model.adv_attack(test_model_input, test[target].values, eval_attacker)
+    print(adv_eval)
     #
-    # res = model.calculate_emb_scales(test_model_input, batch_size=64)
-    # print(res)
+    model.compile("adam", "binary_crossentropy",
+                  metrics=["binary_crossentropy", "auc"], )
+
+    attacker = FGSM(eps = 0.01)
+    history = model.fit(train_model_input, train[target].values, batch_size=64, epochs=10, verbose=2,
+                        adv_type='trades', validation_data=(test_model_input, test[target].values),
+                        attacker=attacker)
+    eval = model.evaluate(test_model_input, test[target].values)
+    print(eval)
+
+    adv_eval = model.adv_attack(test_model_input, test[target].values, eval_attacker)
+    print(adv_eval)
+    #
+    # y = test[target].values
+    # x = test_model_input
+
+    eps = 0.1
+    # attacker = PGD(eps=eps, alpha=3*eps/10, steps = 10)
+    # model.adv_attack(x = x, y = y, attacker = attacker, verbose = True, batch_size=32)
+
+    # attacker = PGD(eps=eps, alpha=3*eps/10, steps = 10, trades=True)
+    # model.adv_attack(x = x, y = y, attacker = attacker, verbose = True, batch_size=32)
+
+
+
+    #
+    # attacker = FGSM(eps=0.05)
+    # model.adv_attack(x = x, y = y, attacker = attacker, verbose = True, batch_size=32)
+    #
+    # attacker = FGSM(eps=0.01, trades=True)
+    # model.adv_attack(x = x, y = y, attacker = attacker, verbose = True, batch_size=32)
