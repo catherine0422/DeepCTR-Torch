@@ -18,7 +18,7 @@ class PGD(Attack):
 
     """
 
-    def __init__(self, eps=0.001, alpha=None, steps=7, random_start=False, trades=False, part_specified=False,var_list = None, biased = False):
+    def __init__(self, eps=0.001, alpha=None, steps=7, random_start=False, trades=False, part_specified=False,var_list = None, normalized = False):
         """
         Arguments:
         --------
@@ -50,7 +50,7 @@ class PGD(Attack):
                     The first element is the delta of sparse embeddings list, the second is the delta
                     of linear sparse embedding list, the last is the delta of dense value.
         """
-        super(PGD, self).__init__("PGD", part_specified=part_specified, var_list = var_list, biased = biased)
+        super(PGD, self).__init__("PGD", part_specified=part_specified, var_list = var_list, normalized = normalized)
         self.eps = eps
         if alpha is None:
             if type(eps) in [list,tuple]:
@@ -87,7 +87,7 @@ class PGD(Attack):
             # Starting at a uniformly random point
             adv_embeddings = apply2nestLists(lambda x: x + torch.empty_like(x).uniform_(-self.eps, self.eps).detach(),
                                              adv_embeddings)
-        if self.biased:
+        if self.normalized:
             normed_original_embeddings = normalize_data(original_embeddings, self.var_list, self.bias_eps)
 
         for i in range(self.steps):
@@ -103,7 +103,7 @@ class PGD(Attack):
             grads = apply2nestLists(lambda x: get_grad(x, cost), adv_embeddings)
             deltas = delta_step(grads, self.alpha)
 
-            if self.biased:
+            if self.normalized:
                 normed_adv_embeddings = normalize_data(adv_embeddings, self.var_list, self.bias_eps)
                 global_distortion = apply2nestLists(lambda x, y, z: x + y - z,
                                                     (normed_adv_embeddings, deltas, normed_original_embeddings))

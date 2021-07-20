@@ -94,7 +94,7 @@ class Linear(nn.Module):
 
     def use_embeddings(self, sparse_embedding_cat, dense_value_cat, sparse_feat_refine_weight=None):
         device = sparse_embedding_cat.device if sparse_embedding_cat is not None else dense_value_cat.device
-        linear_logit = torch.tensor([0]).to(sparse_embedding_cat.device)
+        linear_logit = torch.tensor([0]).to(device)
         if sparse_embedding_cat is not None:
             if sparse_feat_refine_weight is not None:
                 # w_{x,i}=m_{x,i} * w_i (in IFM and DIFM)
@@ -175,7 +175,7 @@ class BaseModel(nn.Module):
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
             validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1,
-            normalized_attack=0, eval_batch_size=256, count=False):
+            eval_batch_size=256, count=False):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -200,7 +200,6 @@ class BaseModel(nn.Module):
             raise ValueError('Count is only implemented under one class attack, current attacker type is: ',
                              attacker.attack, ', adv type is: ', adv_type)
 
-        x_full = x
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
 
@@ -236,14 +235,19 @@ class BaseModel(nn.Module):
         else:
             val_x = []
             val_y = []
-        for i in range(len(x)):
-            if len(x[i].shape) == 1:
-                x[i] = np.expand_dims(x[i], axis=1)
 
-        train_tensor_data = Data.TensorDataset(
-            torch.from_numpy(
-                np.concatenate(x, axis=-1)),
-            torch.from_numpy(y))
+        if type(x) == str:
+            # x is a file name, use npy dataset
+            train_tensor_data = NpyDataset(x, y)
+        else:
+            for i in range(len(x)):
+                if len(x[i].shape) == 1:
+                    x[i] = np.expand_dims(x[i], axis=1)
+            train_tensor_data = Data.TensorDataset(
+                torch.from_numpy(
+                    np.concatenate(x, axis=-1)),
+                torch.from_numpy(y))
+
         if batch_size is None:
             batch_size = 256
 
@@ -317,12 +321,9 @@ class BaseModel(nn.Module):
                                     noise_batch = apply2nestLists(
                                         lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                         global_noise_data)
-                                    if normalized_attack > 0:
-                                        if normalized_attack == 1:
-                                            var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
-                                        if normalized_attack == 2:
-                                            var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
-                                                                       original_embeddings)
+                                    if attacker.normalized:
+                                        var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                                   original_embeddings)
                                         noise_batch = denormalize_data(noise_batch, var_list)
                                         noise_batch = apply2nestLists(
                                             lambda x: Variable(x, requires_grad=True).to(self.device), noise_batch)
@@ -379,12 +380,9 @@ class BaseModel(nn.Module):
                                     noise_batch = apply2nestLists(
                                         lambda x: Variable(x[:y.size(0)], requires_grad=True).to(self.device),
                                         global_noise_data)
-                                    if normalized_attack > 0:
-                                        if normalized_attack == 1:
-                                            var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
-                                        if normalized_attack == 2:
-                                            var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
-                                                                       original_embeddings)
+                                    if attacker.normalized > 0:
+                                        var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                                   original_embeddings)
                                         noise_batch = denormalize_data(noise_batch, var_list)
                                         noise_batch = apply2nestLists(
                                             lambda x: Variable(x, requires_grad=True).to(self.device), noise_batch)
@@ -429,13 +427,10 @@ class BaseModel(nn.Module):
                                 else:
                                     original_embeddings = model.get_embeddings(x,
                                                                                part_specified=attacker.part_specified)
-                                    if normalized_attack == 1:
-                                        var_list = self.compute_full_emb_var(x_full, batch_size=eval_batch_size)
-                                        attacker.set_bias(var_list)
-                                    if normalized_attack == 2:
+                                    if attacker.normalized:
                                         var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
                                                                    original_embeddings)
-                                        attacker.set_bias(var_list)
+                                        attacker.set_normalize_params(var_list)
                                     deltas = attacker(x, y, model)
                                     adv_embeddings = add_nestLists(original_embeddings, deltas)
                                     adv_pred = model.use_embeddings(adv_embeddings)
@@ -540,7 +535,7 @@ class BaseModel(nn.Module):
 
         callbacks.on_train_end()
         if count:
-            return self.history,total_max_idx_count
+            return self.history, total_max_idx_count
         else:
             return self.history
 
@@ -554,6 +549,8 @@ class BaseModel(nn.Module):
         """
         pred_ans = self.predict(x, batch_size)
         eval_result = {}
+        if type(y) == str:
+            y = np.load(y)
         for name, metric_fun in self.metrics.items():
             eval_result[name] = metric_fun(y, pred_ans)
         return eval_result
@@ -568,12 +565,17 @@ class BaseModel(nn.Module):
         model = self.eval()
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
-        for i in range(len(x)):
-            if len(x[i].shape) == 1:
-                x[i] = np.expand_dims(x[i], axis=1)
 
-        tensor_data = Data.TensorDataset(
-            torch.from_numpy(np.concatenate(x, axis=-1)))
+        if type(x) == str:
+            # x is a file name, use npy dataset
+            tensor_data = NpyDataset(x)
+        else:
+            for i in range(len(x)):
+                if len(x[i].shape) == 1:
+                    x[i] = np.expand_dims(x[i], axis=1)
+            tensor_data = Data.TensorDataset(
+                torch.from_numpy(np.concatenate(x, axis=-1)))
+
         test_loader = DataLoader(
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
@@ -601,6 +603,8 @@ class BaseModel(nn.Module):
         pred_ans, distortion, max_idx_count = self.adv_pred(x, y, attacker, batch_size=batch_size, count=count)
 
         eval_result = {}
+        if type(y) == str:
+            y = np.load(y)
         for name, metric_fun in self.metrics.items():
             eval_result[name] = metric_fun(y, pred_ans)
 
@@ -618,15 +622,21 @@ class BaseModel(nn.Module):
 
     def adv_pred(self, x, y, attacker, batch_size=256, count=False):
         model = self.eval()
-        if isinstance(x, dict):
-            x = [x[feature] for feature in self.feature_index]
-        for i in range(len(x)):
-            if len(x[i].shape) == 1:
-                x[i] = np.expand_dims(x[i], axis=1)
+        if type(x) == str:
+            if type(y) != str:
+                raise ValueError('argument x and y should all be file name to use NpyDataset')
+            else:
+                tensor_data = NpyDataset(x, y)
+        else:
+            if isinstance(x, dict):
+                x = [x[feature] for feature in self.feature_index]
+            for i in range(len(x)):
+                if len(x[i].shape) == 1:
+                    x[i] = np.expand_dims(x[i], axis=1)
+            tensor_data = Data.TensorDataset(
+                torch.from_numpy(np.concatenate(x, axis=-1)),
+                torch.from_numpy(y))
 
-        tensor_data = Data.TensorDataset(
-            torch.from_numpy(np.concatenate(x, axis=-1)),
-            torch.from_numpy(y))
         test_loader = DataLoader(
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
@@ -638,7 +648,10 @@ class BaseModel(nn.Module):
                 x, label = x.to(self.device).float(), label.to(self.device).float()
                 if attacker.attack != 'ONE_CLASS':
                     original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
-
+                    if attacker.normalized:
+                        var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                                   original_embeddings)
+                        attacker.set_normalize_params(var_list)
                     with torch.enable_grad():
                         deltas = attacker(x, label, model)
                     adv_embeddings = add_nestLists(original_embeddings, deltas)

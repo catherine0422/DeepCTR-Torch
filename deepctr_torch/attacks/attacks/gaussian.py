@@ -26,8 +26,8 @@ class GAUSSIAN(Attack):
 
     """
 
-    def __init__(self, eps=0.001, part_specified=False,var_list = None, biased = False):
-        super(GAUSSIAN, self).__init__("GAUSSIAN", part_specified=part_specified, var_list = var_list, biased = biased)
+    def __init__(self, eps=0.001, part_specified=False,var_list = None, normalized = False):
+        super(GAUSSIAN, self).__init__("GAUSSIAN", part_specified=part_specified, var_list = var_list, normalized = normalized)
         self.eps = eps
 
     def forward(self, samples, labels, model):
@@ -44,7 +44,7 @@ class GAUSSIAN(Attack):
         original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified)
         f = lambda x,y: torch.normal(mean=0, std=x, size=y.size()).to(model.device)
         deltas = func_detect_arg_type(f,self.eps,original_embeddings)
-        if self.biased:
+        if self.normalized:
             deltas = denormalize_data(deltas,self.var_list, self.bias_eps)
 
         if training_mode:

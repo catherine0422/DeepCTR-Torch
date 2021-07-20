@@ -17,7 +17,7 @@ class FGSM(Attack):
 
     """
 
-    def __init__(self, eps=0.001, random_start=False, trades=False, part_specified=False, var_list = None, biased = False):
+    def __init__(self, eps=0.001, random_start=False, trades=False, part_specified=False, var_list = None, normalized = False):
         """
         Arguments:
         --------
@@ -41,7 +41,7 @@ class FGSM(Attack):
                     of linear sparse embedding list, the last is the delta of dense value.
 
         """
-        super(FGSM, self).__init__("FGSM", part_specified=part_specified, var_list = var_list, biased = biased)
+        super(FGSM, self).__init__("FGSM", part_specified=part_specified, var_list = var_list, normalized = normalized)
         self.eps = eps
         self.random_start = random_start
         self.trades = trades
@@ -77,8 +77,8 @@ class FGSM(Attack):
 
         grads = apply2nestLists(lambda x: get_grad(x, cost), adv_embeddings)
         deltas = delta_step(grads, self.eps)
-        if self.biased:
-            deltas = denormalize_data(deltas,self.var_list, self.bias_eps)
+        if self.normalized:
+            deltas = denormalize_data(deltas, self.var_list, self.bias_eps)
 
         if training_mode:
             model.train()

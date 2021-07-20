@@ -48,7 +48,7 @@ class ONE_CLASS(Attack):
             adv_value_lists[type_idx][tensor_idx][i][0][delidx] = 0
             adv_value_lists[type_idx][tensor_idx][i][0][ele_idx] = 1
         else:
-            raise NotImplementedError('dense error not implemented')
+            adv_value_lists[type_idx][tensor_idx][i][0] = adv_value_lists[type_idx][tensor_idx][i][0] + 1
 
         return adv_value_lists
 

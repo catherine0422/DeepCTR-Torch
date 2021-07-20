@@ -9,7 +9,7 @@ class Attack(object):
         It basically changes training mode to eval during attack process.
     """
 
-    def __init__(self, name, part_specified = False, bias_eps = 1e-5, var_list = None, biased = False):
+    def __init__(self, name, part_specified = False, bias_eps = 1e-5, var_list = None, normalized = False):
         r"""
         Initializes internal attack state.
         Arguments:
@@ -19,10 +19,11 @@ class Attack(object):
         self.attack = name
         self._training_mode = False
         self.part_specified = part_specified
-        self.biased = biased
+        self.normalized = normalized
         self.var_list = var_list
         self.trades = False
         self.bias_eps = bias_eps
+        self.nrmalized_attack = False
 
     def set_trades_mode(self, trades):
         self.trades = trades
@@ -42,12 +43,12 @@ class Attack(object):
         """
         self._training_mode = flag
 
-    def set_bias(self, var_list):
-        self.biased = True
+    def set_normalize_params(self, var_list):
+        self.normalized = True
         self.var_list = var_list
 
-    def disable_bias(self):
-        self.biased = False
+    def disable_normalize(self):
+        self.normalized = False
 
     def __str__(self):
         info = self.__dict__.copy()
