@@ -46,7 +46,7 @@ class FGSM(Attack):
         self.random_start = random_start
         self.trades = trades
 
-    def forward(self, samples, labels, model):
+    def forward(self, samples, labels, model, value_lists=None):
         r"""
         Overridden.
         """
@@ -57,7 +57,7 @@ class FGSM(Attack):
         else:
             model.eval()
 
-        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified)
+        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified,value_lists=value_lists)
 
         adv_embeddings = apply2nestLists(lambda x: x.clone().detach().to(model.device), original_embeddings)
 

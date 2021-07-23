@@ -25,10 +25,10 @@ except ImportError:
     from tensorflow.python.keras._impl.keras.callbacks import CallbackList
 
 from ..inputs import build_input_features, SparseFeat, DenseFeat, VarLenSparseFeat, get_varlen_pooling_list, \
-    create_embedding_matrix, varlen_embedding_lookup, build_input_values_index
+    create_embedding_matrix, varlen_embedding_lookup, build_input_values_index, varlen_embedding_lookup_from_value_list
 from ..layers import PredictionLayer
 from ..layers.utils import slice_arrays
-from ..callbacks import History
+from ..callbacks import History,ModelCheckpoint
 from ..attacks.utils import *
 from ..attacks import FGSM
 from ..datasets import NpyDataset
@@ -77,13 +77,12 @@ class Linear(nn.Module):
                             self.dense_feature_columns]
         return dense_value_list, sparse_value_list, var_len_sparse_value_list
 
-    def input_from_feature_columns(self, X, dense_value_list, sparse_value_list, var_len_sparse_value_list):
+    def input_from_value_lists(self, X, dense_value_list, sparse_value_list, var_len_sparse_value_list):
 
         sparse_embedding_list = [self.embedding_dict[feat.embedding_name](sparse_value_list[i]) for
                                  i, feat in enumerate(self.sparse_feature_columns)]
 
-        sequence_embed_dict = varlen_embedding_lookup(var_len_sparse_value_list, self.embedding_dict,
-                                                      self.feature_index,
+        sequence_embed_dict = varlen_embedding_lookup_from_value_list(var_len_sparse_value_list, self.embedding_dict,
                                                       self.varlen_sparse_feature_columns)
         varlen_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
                                                         self.varlen_sparse_feature_columns, self.device)
@@ -91,6 +90,24 @@ class Linear(nn.Module):
         sparse_embedding_list += varlen_embedding_list
 
         return sparse_embedding_list, dense_value_list
+
+    def input_from_feature_columns(self, X):
+        sparse_embedding_list = [self.embedding_dict[feat.embedding_name](
+            X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].long()) for
+            feat in self.sparse_feature_columns]
+
+        dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
+                            self.dense_feature_columns]
+
+        sequence_embed_dict = varlen_embedding_lookup(X, self.embedding_dict, self.feature_index,
+                                                      self.varlen_sparse_feature_columns)
+        varlen_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
+                                                        self.varlen_sparse_feature_columns, self.device)
+
+        sparse_embedding_list += varlen_embedding_list
+
+        return sparse_embedding_list,dense_value_list
+
 
     def use_embeddings(self, sparse_embedding_cat, dense_value_cat, sparse_feat_refine_weight=None):
         device = sparse_embedding_cat.device if sparse_embedding_cat is not None else dense_value_cat.device
@@ -109,11 +126,9 @@ class Linear(nn.Module):
 
     def forward(self, X, sparse_feat_refine_weight=None):
 
-        dense_value_list, sparse_value_list, var_len_sparse_value_list = self.one_hot_value_from_feature_columns(X)
+        # dense_value_list, sparse_value_list, var_len_sparse_value_list = self.one_hot_value_from_feature_columns(X)
 
-        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, dense_value_list,
-                                                                                  sparse_value_list,
-                                                                                  var_len_sparse_value_list)
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X)
 
         linear_logit = self.use_embeddings(sparse_embedding_list, dense_value_list, sparse_feat_refine_weight)
 
@@ -175,7 +190,7 @@ class BaseModel(nn.Module):
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
             validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1,
-            eval_batch_size=256, count=False):
+            eval_batch_size=256, count=False, p_data_sample=1):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -196,6 +211,7 @@ class BaseModel(nn.Module):
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
+
         if count and (attacker.attack != 'ONE_CLASS' or adv_type != 'normal'):
             raise ValueError('Count is only implemented under one class attack, current attacker type is: ',
                              attacker.attack, ', adv type is: ', adv_type)
@@ -238,7 +254,7 @@ class BaseModel(nn.Module):
 
         if type(x) == str:
             # x is a file name, use npy dataset
-            train_tensor_data = NpyDataset(x, y)
+            train_tensor_data = NpyDataset(x, y, p_sample=p_data_sample)
         else:
             for i in range(len(x)):
                 if len(x[i].shape) == 1:
@@ -277,7 +293,11 @@ class BaseModel(nn.Module):
         if not hasattr(callbacks, 'model'):  # for tf1.4
             callbacks.__setattr__('model', self)
         callbacks.model.stop_training = False
-
+        save_freq = steps_per_epoch
+        for callback in callbacks.callbacks:
+            if type(callback) == ModelCheckpoint:
+                if type(callback.save_freq) != str:
+                    save_freq = callback.save_freq
         # Train
         print("Train on {0} samples, validate on {1} samples, {2} steps per epoch".format(
             len(train_tensor_data), len(val_y), steps_per_epoch))
@@ -287,13 +307,16 @@ class BaseModel(nn.Module):
         for epoch in range(initial_epoch, epochs):
             callbacks.on_epoch_begin(epoch)
             epoch_logs = {}
+            batch_logs = {}
             start_time = time.time()
             loss_epoch = 0
             total_loss_epoch = 0
             train_result = {}
+            print('\nEpoch {0}/{1}'.format(epoch + 1, epochs))
             try:
                 with tqdm(enumerate(train_loader), disable=verbose not in [1, 3], leave=False) as t:
-                    for _, (x_train, y_train) in t:
+                    for steps, (x_train, y_train) in t:
+
                         x = x_train.to(self.device).float()
                         y = y_train.to(self.device).float()
 
@@ -408,8 +431,7 @@ class BaseModel(nn.Module):
                             elif adv_type in ['normal', 'trades']:
                                 # prediction on original sample
                                 optim.zero_grad()
-                                value_lists = model.get_one_hot_values(x)
-                                y_pred = model.use_one_hot_values(x, value_lists)
+                                y_pred = model(x)
                                 loss = loss_func(y_pred.squeeze(), y.squeeze(), reduction='sum')
 
                                 # prediction on adv sample
@@ -418,15 +440,13 @@ class BaseModel(nn.Module):
                                     attacker.set_trades_mode(True)
                                 if attacker.attack == 'ONE_CLASS':
                                     if count:
-                                        adv_value_lists, max_idx_count = attacker(x, y, model, value_lists=value_lists,
-                                                                                  count=count)
+                                        adv_value_lists, max_idx_count = attacker(x, y, model, count=count)
                                         total_max_idx_count = append_counts(total_max_idx_count, max_idx_count)
                                     else:
-                                        adv_value_lists = attacker(x, y, model, value_lists=value_lists)
+                                        adv_value_lists = attacker(x, y, model)
                                     adv_pred = model.use_one_hot_values(x, adv_value_lists)
                                 else:
-                                    original_embeddings = model.get_embeddings(x,
-                                                                               part_specified=attacker.part_specified)
+                                    original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
                                     if attacker.normalized:
                                         var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
                                                                    original_embeddings)
@@ -434,6 +454,7 @@ class BaseModel(nn.Module):
                                     deltas = attacker(x, y, model)
                                     adv_embeddings = add_nestLists(original_embeddings, deltas)
                                     adv_pred = model.use_embeddings(adv_embeddings)
+                                    del adv_embeddings
                                 if adv_type == 'normal':
                                     adv_loss = loss_func(adv_pred.squeeze(), y.squeeze(), reduction='sum')
                                 elif adv_type == 'trades':
@@ -448,6 +469,10 @@ class BaseModel(nn.Module):
                                 total_loss_epoch += total_loss.item()
                                 total_loss.backward()
                                 optim.step()
+
+                                del original_embeddings
+                                del total_loss
+                                torch.cuda.empty_cache()
 
                                 attacker.set_trades_mode(False)
 
@@ -468,67 +493,71 @@ class BaseModel(nn.Module):
                             total_loss.backward()
                             optim.step()
 
-                        if verbose > 1:
-                            if 0 in y and 1 in y:
-                                for name, metric_fun in self.metrics.items():
-                                    if name not in train_result:
-                                        train_result[name] = []
-                                    train_result[name].append(metric_fun(
-                                        y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+
+                        if 0 in y and 1 in y:
+                            for name, metric_fun in self.metrics.items():
+                                if name not in train_result:
+                                    train_result[name] = []
+                                train_result[name].append(metric_fun(
+                                    y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                                if adv_type is not None:
+                                    name_adv = "adv_" + name
+                                    if name_adv not in train_result:
+                                        train_result[name_adv] = []
+                                    train_result[name_adv].append(metric_fun(
+                                        y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
+                        epoch_end = (steps+1)==steps_per_epoch
+                        if (steps+1) % save_freq == 0 or epoch_end:
+                            batch_logs["loss"] = total_loss_epoch / ((steps+1)*batch_size) if not epoch_end else total_loss_epoch / sample_num
+                            for name, result in train_result.items():
+                                batch_logs[name] = np.sum(result) / (steps+1)
+                            if do_validation:
+                                eval_result = self.evaluate(val_x, val_y, eval_batch_size)
+                                for name, result in eval_result.items():
+                                    batch_logs["val_" + name] = result
+                                if adv_type is not None:
+                                    adv_eval_result = self.adv_attack(val_x, val_y, attacker,
+                                                                      batch_size=eval_batch_size)
+                                    for name, result in adv_eval_result.items():
+                                        batch_logs["val_adv_" + name] = result
+                            for k, v in batch_logs.items():
+                                epoch_logs.setdefault(k, []).append(v)
+
+                            # verbose
+                            if verbose > 1:
+                                current_time = time.time()
+                                batch_time = int(current_time - start_time)
+                                eval_str = f"{batch_time}s [{steps+1:05d}/{steps_per_epoch:05d}] - loss: {batch_logs['loss']: .4f}"
+
+                                for name in self.metrics:
+                                    eval_str += " - " + name + \
+                                                ": {0: .4f}".format(batch_logs[name])
                                     if adv_type is not None:
                                         name_adv = "adv_" + name
-                                        if name_adv not in train_result:
-                                            train_result[name_adv] = []
-                                        train_result[name_adv].append(metric_fun(
-                                            y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
+                                        eval_str += " - " + name_adv + \
+                                                    ": {0: .4f}".format(batch_logs[name_adv])
 
+                                if do_validation:
+                                    eval_str += " \n "
+                                    for name in self.metrics:
+                                        eval_str += " - " + "val_" + name + \
+                                                    ": {0: .4f}".format(batch_logs["val_" + name])
+                                        if adv_type is not None:
+                                            name_adv = "adv_" + name
+                                            eval_str += " - " + "val_" + name_adv + \
+                                                        ": {0: .4f}".format(batch_logs["val_" + name_adv])
+                                print(eval_str)
+
+                            callbacks.on_train_batch_end(steps+1, batch_logs)
 
             except KeyboardInterrupt:
                 t.close()
                 raise
             t.close()
 
-            # Add epoch_logs
-            epoch_logs["loss"] = total_loss_epoch / sample_num
-            for name, result in train_result.items():
-                epoch_logs[name] = np.sum(result) / steps_per_epoch
-
-            if do_validation:
-                eval_result = self.evaluate(val_x, val_y, eval_batch_size)
-                for name, result in eval_result.items():
-                    epoch_logs["val_" + name] = result
-                if adv_type is not None:
-                    adv_eval_result = self.adv_attack(val_x, val_y, attacker, batch_size=eval_batch_size)
-                    for name, result in adv_eval_result.items():
-                        epoch_logs["val_adv_" + name] = result
-
             epoch_time = int(time.time() - start_time)
             epoch_logs['epoch_time'] = epoch_time
-            # verbose
-            if verbose > 1:
-                print('Epoch {0}/{1}'.format(epoch + 1, epochs))
 
-                eval_str = "{0}s - loss: {1: .4f}".format(
-                    epoch_time, epoch_logs["loss"])
-
-                for name in self.metrics:
-                    eval_str += " - " + name + \
-                                ": {0: .4f}".format(epoch_logs[name])
-                    if adv_type is not None:
-                        name_adv = "adv_" + name
-                        eval_str += " - " + name_adv + \
-                                    ": {0: .4f}".format(epoch_logs[name_adv])
-
-                if do_validation:
-                    eval_str += " \n "
-                    for name in self.metrics:
-                        eval_str += " - " + "val_" + name + \
-                                    ": {0: .4f}".format(epoch_logs["val_" + name])
-                        if adv_type is not None:
-                            name_adv = "adv_" + name
-                            eval_str += " - " + "val_" + name_adv + \
-                                        ": {0: .4f}".format(epoch_logs["val_" + name_adv])
-                print(eval_str)
             callbacks.on_epoch_end(epoch, epoch_logs)
             if self.stop_training:
                 break
@@ -600,7 +629,7 @@ class BaseModel(nn.Module):
         if count and attacker.attack != 'ONE_CLASS':
             raise ValueError('Count should by compared with an one class attak, current attacker type is:',
                              attacker.attack)
-        pred_ans, distortion, max_idx_count = self.adv_pred(x, y, attacker, batch_size=batch_size, count=count)
+        pred_ans, distortion, max_idx_count = self.adv_pred(x, y, attacker, batch_size=batch_size, count=count,verbose=verbose)
 
         eval_result = {}
         if type(y) == str:
@@ -620,7 +649,7 @@ class BaseModel(nn.Module):
         else:
             return eval_result
 
-    def adv_pred(self, x, y, attacker, batch_size=256, count=False):
+    def adv_pred(self, x, y, attacker, batch_size=256, count=False, verbose = False):
         model = self.eval()
         if type(x) == str:
             if type(y) != str:
@@ -644,7 +673,7 @@ class BaseModel(nn.Module):
         pred_ans = []
         total_max_idx_count = {}
         with torch.no_grad():
-            for x, label in test_loader:
+            for x, label in tqdm(test_loader, disable=int(verbose)<2, leave=False):
                 x, label = x.to(self.device).float(), label.to(self.device).float()
                 if attacker.attack != 'ONE_CLASS':
                     original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
@@ -750,24 +779,41 @@ class BaseModel(nn.Module):
 
         return dense_value_list, sparse_value_list, var_len_sparse_value_list
 
-    def input_from_feature_columns(self, dense_value_list, sparse_value_list, var_len_sparse_value_list, X,
+    def input_from_value_lists(self, dense_value_list, sparse_value_list, var_len_sparse_value_list, X,
                                    embedding_dict):
 
         sparse_embedding_list = [embedding_dict[feat.embedding_name](sparse_value_list[i]) for
                                  i, feat in enumerate(self.sparse_feature_columns)]
 
-        sequence_embed_dict = varlen_embedding_lookup(var_len_sparse_value_list, self.embedding_dict,
-                                                      self.feature_index,
+        sequence_embed_dict = varlen_embedding_lookup_from_value_list(var_len_sparse_value_list, self.embedding_dict,
                                                       self.varlen_sparse_feature_columns)
         varlen_sparse_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
                                                                self.varlen_sparse_feature_columns, self.device)
 
         return sparse_embedding_list + varlen_sparse_embedding_list, dense_value_list
 
-    def unravel_flatten_value_index(self, index):
-        """
-        Unravel the index of the flatten input value into the [value type index, tensor index, position index]
-        """
+
+    def input_from_feature_columns(self, X,  embedding_dict, support_dense=True):
+
+        if not support_dense and len(self.dense_feature_columns) > 0:
+            raise ValueError(
+                "DenseFeat is not supported in dnn_feature_columns")
+
+
+        sparse_embedding_list = [embedding_dict[feat.embedding_name](
+            X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]].long()) for
+            feat in self.sparse_feature_columns]
+
+        sequence_embed_dict = varlen_embedding_lookup(X, self.embedding_dict, self.feature_index,
+                                                      self.varlen_sparse_feature_columns)
+
+        varlen_sparse_embedding_list = get_varlen_pooling_list(sequence_embed_dict, X, self.feature_index,
+                                                               self.varlen_sparse_feature_columns, self.device)
+
+        dense_value_list = [X[:, self.feature_index[feat.name][0]:self.feature_index[feat.name][1]] for feat in
+                            self.dense_feature_columns]
+
+        return sparse_embedding_list + varlen_sparse_embedding_list, dense_value_list
 
     def compute_input_dim(self, include_sparse=True, include_dense=True, feature_group=False):
         sparse_feature_columns = self.sparse_feature_columns + self.varlen_sparse_feature_columns

@@ -3,7 +3,7 @@ from tensorflow.python.keras.callbacks import EarlyStopping
 from tensorflow.python.keras.callbacks import ModelCheckpoint
 from tensorflow.python.keras.callbacks import History
 
-EarlyStopping = EarlyStopping
+# EarlyStopping = EarlyStopping
 History = History
 
 class ModelCheckpoint(ModelCheckpoint):
@@ -38,10 +38,22 @@ class ModelCheckpoint(ModelCheckpoint):
         period: Interval (number of epochs) between checkpoints.
     """
 
-    def on_epoch_end(self, epoch, logs=None):
+    def on_train_batch_end(self, batch, logs=None):
+        # if self._should_save_on_batch(batch):
+        self._save_model(epoch=self._current_epoch, logs=logs)
+
+    def _save_model(self, epoch, logs):
+        """Saves the model.
+
+        Arguments:
+            epoch: the epoch this iteration is in.
+            logs: the `logs` dict passed in to `on_batch_end` or `on_epoch_end`.
+        """
         logs = logs or {}
-        self.epochs_since_last_save += 1
-        if self.epochs_since_last_save >= self.period:
+
+        if isinstance(self.save_freq,
+                      int) or self.epochs_since_last_save >= self.period:
+            # Block only when saving interval is reached.
             self.epochs_since_last_save = 0
             filepath = self.filepath.format(epoch=epoch + 1, **logs)
             if self.save_best_only:
@@ -71,3 +83,26 @@ class ModelCheckpoint(ModelCheckpoint):
                     torch.save(self.model.state_dict(), filepath)
                 else:
                     torch.save(self.model, filepath)
+
+
+class EarlyStopping(EarlyStopping):
+    def on_epoch_end(self, epoch, logs=None):
+        current = self.get_monitor_value(logs)
+        if type(current) == list:
+            current = current[-1]
+        if current is None:
+            return
+        if self.monitor_op(current - self.min_delta, self.best):
+            self.best = current
+            self.wait = 0
+            if self.restore_best_weights:
+                self.best_weights = self.model.get_weights()
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                self.stopped_epoch = epoch
+                self.model.stop_training = True
+                if self.restore_best_weights:
+                    if self.verbose > 0:
+                        print('Restoring model weights from the end of the best epoch.')
+                    self.model.set_weights(self.best_weights)

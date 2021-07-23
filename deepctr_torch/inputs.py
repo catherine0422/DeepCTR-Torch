@@ -199,8 +199,14 @@ def create_embedding_matrix(feature_columns, init_std=0.0001, linear=False, spar
     varlen_sparse_feature_columns = list(
         filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if len(feature_columns) else []
 
+    # embedding_dict = nn.ModuleDict(
+    #     {feat.embedding_name: nn.Linear(feat.vocabulary_size, feat.embedding_dim if not linear else 1)
+    #      for feat in
+    #      sparse_feature_columns + varlen_sparse_feature_columns}
+    # )
+
     embedding_dict = nn.ModuleDict(
-        {feat.embedding_name: nn.Linear(feat.vocabulary_size, feat.embedding_dim if not linear else 1)
+        {feat.embedding_name: nn.Embedding(feat.vocabulary_size, feat.embedding_dim if not linear else 1, sparse=sparse)
          for feat in
          sparse_feature_columns + varlen_sparse_feature_columns}
     )
@@ -245,7 +251,7 @@ def embedding_lookup(X, sparse_embedding_dict, sparse_input_dict, sparse_feature
     return group_embedding_dict
 
 
-def varlen_embedding_lookup(var_len_sparse_value_list, embedding_dict, sequence_input_dict, varlen_sparse_feature_columns):
+def varlen_embedding_lookup_from_value_list(var_len_sparse_value_list, embedding_dict, varlen_sparse_feature_columns):
     varlen_embedding_vec_dict = {}
     for i,fc in enumerate(varlen_sparse_feature_columns):
         feature_name = fc.name
@@ -258,6 +264,23 @@ def varlen_embedding_lookup(var_len_sparse_value_list, embedding_dict, sequence_
         #     lookup_idx = sequence_input_dict[feature_name]
         varlen_embedding_vec_dict[feature_name] = embedding_dict[embedding_name](
             var_len_sparse_value_list[i])  # (lookup_idx)
+
+    return varlen_embedding_vec_dict
+
+
+def varlen_embedding_lookup(X, embedding_dict, sequence_input_dict, varlen_sparse_feature_columns):
+    varlen_embedding_vec_dict = {}
+    for fc in varlen_sparse_feature_columns:
+        feature_name = fc.name
+        embedding_name = fc.embedding_name
+        if fc.use_hash:
+            # lookup_idx = Hash(fc.vocabulary_size, mask_zero=True)(sequence_input_dict[feature_name])
+            # TODO: add hash function
+            lookup_idx = sequence_input_dict[feature_name]
+        else:
+            lookup_idx = sequence_input_dict[feature_name]
+        varlen_embedding_vec_dict[feature_name] = embedding_dict[embedding_name](
+            X[:, lookup_idx[0]:lookup_idx[1]].long())  # (lookup_idx)
 
     return varlen_embedding_vec_dict
 

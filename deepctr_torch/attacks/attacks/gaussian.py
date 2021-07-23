@@ -30,7 +30,7 @@ class GAUSSIAN(Attack):
         super(GAUSSIAN, self).__init__("GAUSSIAN", part_specified=part_specified, var_list = var_list, normalized = normalized)
         self.eps = eps
 
-    def forward(self, samples, labels, model):
+    def forward(self, samples, labels, model, value_lists=None):
         r"""
         Overridden.
         """
@@ -41,8 +41,8 @@ class GAUSSIAN(Attack):
         else:
             model.eval()
 
-        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified)
-        f = lambda x,y: torch.normal(mean=0, std=x, size=y.size()).to(model.device)
+        original_embeddings = model.get_embeddings(samples, part_specified=self.part_specified, value_lists=value_lists)
+        f = lambda x,y: torch.normal(mean=0, std=x, size=y.size()).to(model.device) if x>0 else torch.zeros_like(y).to(model.device)
         deltas = func_detect_arg_type(f,self.eps,original_embeddings)
         if self.normalized:
             deltas = denormalize_data(deltas,self.var_list, self.bias_eps)
