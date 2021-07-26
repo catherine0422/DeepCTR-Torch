@@ -42,6 +42,12 @@ class ModelCheckpoint(ModelCheckpoint):
         # if self._should_save_on_batch(batch):
         self._save_model(epoch=self._current_epoch, logs=logs)
 
+    def on_epoch_end(self, epoch, logs=None):
+        self.epochs_since_last_save += 1
+        # pylint: disable=protected-access
+        if self.save_freq == 'epoch':
+            self._save_model(epoch=epoch, logs=logs)
+
     def _save_model(self, epoch, logs):
         """Saves the model.
 
@@ -58,6 +64,9 @@ class ModelCheckpoint(ModelCheckpoint):
             filepath = self.filepath.format(epoch=epoch + 1, **logs)
             if self.save_best_only:
                 current = logs.get(self.monitor)
+                if type(current) == list:
+                    current = current[-1]
+
                 if current is None:
                     print('Can save best model only with %s available, skipping.' % self.monitor)
                 else:

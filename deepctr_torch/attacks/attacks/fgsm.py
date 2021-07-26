@@ -63,8 +63,8 @@ class FGSM(Attack):
 
         if self.random_start or self.trades:
             # Starting at a uniformly random point
-            adv_embeddings = apply2nestLists(lambda x: x + torch.empty_like(x).uniform_(-self.eps, self.eps).detach(),
-                                             adv_embeddings)
+            f = lambda x,y: x + torch.empty_like(y).uniform_(-x, x).detach()
+            adv_embeddings = func_detect_arg_type(f, self.eps, adv_embeddings)
 
         adv_embeddings = apply2nestLists(lambda x: x.requires_grad_(True), adv_embeddings)
         adv_pred = model.use_embeddings(adv_embeddings)

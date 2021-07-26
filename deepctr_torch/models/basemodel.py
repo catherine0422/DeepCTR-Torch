@@ -190,7 +190,7 @@ class BaseModel(nn.Module):
 
     def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
             validation_data=None, shuffle=True, callbacks=None, adv_type=None, attacker=FGSM(), lam=1,
-            eval_batch_size=256, count=False, p_data_sample=1):
+            eval_batch_size=256, count=False, p_data_sample=1, verbose_freq='epoch'):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -293,11 +293,18 @@ class BaseModel(nn.Module):
         if not hasattr(callbacks, 'model'):  # for tf1.4
             callbacks.__setattr__('model', self)
         callbacks.model.stop_training = False
-        save_freq = steps_per_epoch
+        save_freq = 'epoch'
         for callback in callbacks.callbacks:
             if type(callback) == ModelCheckpoint:
-                if type(callback.save_freq) != str:
-                    save_freq = callback.save_freq
+                save_freq = callback.save_freq
+        if type(verbose_freq) == str:
+            if verbose_freq == 'epoch':
+                verbose_freq = steps_per_epoch
+            else:
+                raise ValueError('Unrecognized verbose_freq: ', verbose_freq)
+        if isinstance(save_freq, int) and isinstance(verbose_freq, int) and save_freq%verbose_freq !=0:
+            raise ValueError(f'Save frequency should be devisible by verbose frequency: {save_freq} % {verbose_freq} = {save_freq%verbose_freq}')
+
         # Train
         print("Train on {0} samples, validate on {1} samples, {2} steps per epoch".format(
             len(train_tensor_data), len(val_y), steps_per_epoch))
@@ -506,8 +513,9 @@ class BaseModel(nn.Module):
                                         train_result[name_adv] = []
                                     train_result[name_adv].append(metric_fun(
                                         y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
+
                         epoch_end = (steps+1)==steps_per_epoch
-                        if (steps+1) % save_freq == 0 or epoch_end:
+                        if (steps+1) % verbose_freq == 0 or epoch_end:
                             batch_logs["loss"] = total_loss_epoch / ((steps+1)*batch_size) if not epoch_end else total_loss_epoch / sample_num
                             for name, result in train_result.items():
                                 batch_logs[name] = np.sum(result) / (steps+1)
@@ -542,13 +550,13 @@ class BaseModel(nn.Module):
                                     for name in self.metrics:
                                         eval_str += " - " + "val_" + name + \
                                                     ": {0: .4f}".format(batch_logs["val_" + name])
-                                        if adv_type is not None:
-                                            name_adv = "adv_" + name
-                                            eval_str += " - " + "val_" + name_adv + \
-                                                        ": {0: .4f}".format(batch_logs["val_" + name_adv])
+                                        # if adv_type is not None:
+                                        #     name_adv = "adv_" + name
+                                        #     eval_str += " - " + "val_" + name_adv + \
+                                        #                 ": {0: .4f}".format(batch_logs["val_" + name_adv])
                                 print(eval_str)
-
-                            callbacks.on_train_batch_end(steps+1, batch_logs)
+                            if type(save_freq) != str and (steps+1)%save_freq == 0:
+                                callbacks.on_train_batch_end(steps+1, batch_logs)
 
             except KeyboardInterrupt:
                 t.close()
