@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from .basemodel import BaseModel
-from ..inputs import combined_dnn_input
+from ..inputs import combined_dnn_input, combined_dnn_input_tensor
 from ..layers import DNN, concat_fun, InnerProductLayer, OutterProductLayer
 
 
@@ -75,16 +75,20 @@ class PNN(BaseModel):
 
         self.to(device)
 
-    def get_embeddings(self, X):
-        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
-                                                                                  self.embedding_dict)
-        linear_sparse_embedding_list = []
+    def get_embeddings(self, X, part_specified=False, value_lists=None):
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.embedding_dict)
 
-        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+        sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
+        linear_sparse_embedding_tensor = None
+        dense_value_tensor = concat_fun(dense_value_list)
 
-    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
-        linear_signal = torch.flatten(
-            concat_fun(sparse_embedding_list), start_dim=1)
+        return [dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor]
+
+    def use_embeddings(self, embeddings):
+        dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor = embeddings
+        linear_signal = sparse_embedding_tensor
+        sparse_embedding_list = torch.split(sparse_embedding_tensor, self.embedding_size, dim=1)
+        sparse_embedding_list = [x.unsqueeze(dim=1) for x in sparse_embedding_list]
 
         if self.use_inner:
             inner_product = torch.flatten(
@@ -103,7 +107,7 @@ class PNN(BaseModel):
         else:
             product_layer = linear_signal
 
-        dnn_input = combined_dnn_input([product_layer], dense_value_list)
+        dnn_input = combined_dnn_input_tensor(product_layer, dense_value_tensor)
         dnn_output = self.dnn(dnn_input)
         dnn_logit = self.dnn_linear(dnn_output)
         logit = dnn_logit
@@ -115,5 +119,5 @@ class PNN(BaseModel):
     def forward(self, X):
         embeddings = self.get_embeddings(X)
 
-        y_pred = self.use_embeddings(*embeddings)
+        y_pred = self.use_embeddings(embeddings)
         return y_pred

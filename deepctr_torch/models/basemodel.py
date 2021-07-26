@@ -319,7 +319,8 @@ class BaseModel(nn.Module):
             loss_epoch = 0
             total_loss_epoch = 0
             train_result = {}
-            print('\nEpoch {0}/{1}'.format(epoch + 1, epochs))
+            if verbose > 1:
+                print('\nEpoch {0}/{1}'.format(epoch + 1, epochs))
             try:
                 with tqdm(enumerate(train_loader), disable=verbose not in [1, 3], leave=False) as t:
                     for steps, (x_train, y_train) in t:
@@ -501,18 +502,18 @@ class BaseModel(nn.Module):
                             optim.step()
 
 
-                        if 0 in y and 1 in y:
-                            for name, metric_fun in self.metrics.items():
-                                if name not in train_result:
-                                    train_result[name] = []
-                                train_result[name].append(metric_fun(
-                                    y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
-                                if adv_type is not None:
-                                    name_adv = "adv_" + name
-                                    if name_adv not in train_result:
-                                        train_result[name_adv] = []
-                                    train_result[name_adv].append(metric_fun(
-                                        y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
+
+                        for name, metric_fun in self.metrics.items():
+                            if name not in train_result:
+                                train_result[name] = []
+                            train_result[name].append(metric_fun(
+                                y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                            if adv_type is not None:
+                                name_adv = "adv_" + name
+                                if name_adv not in train_result:
+                                    train_result[name_adv] = []
+                                train_result[name_adv].append(metric_fun(
+                                    y.cpu().data.numpy(), adv_pred.cpu().data.numpy().astype("float64")))
 
                         epoch_end = (steps+1)==steps_per_epoch
                         if (steps+1) % verbose_freq == 0 or epoch_end:

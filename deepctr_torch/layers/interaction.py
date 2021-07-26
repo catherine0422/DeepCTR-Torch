@@ -559,21 +559,21 @@ class InnerProductLayer(nn.Module):
         embed_list = inputs
         row = []
         col = []
-        num_inputs = len(embed_list)
+        num_inputs = len(embed_list)  # num_sparse_feat
 
         for i in range(num_inputs - 1):
             for j in range(i + 1, num_inputs):
                 row.append(i)
                 col.append(j)
         p = torch.cat([embed_list[idx]
-                       for idx in row], dim=1)  # batch num_pairs k
+                       for idx in row], dim=1)  # [batch num_pairs emb_dim]
         q = torch.cat([embed_list[idx]
                        for idx in col], dim=1)
 
-        inner_product = p * q
+        inner_product = p * q  # [batch num_pairs emb_dim]
         if self.reduce_sum:
             inner_product = torch.sum(
-                inner_product, dim=2, keepdim=True)
+                inner_product, dim=2, keepdim=True)  # [batch num_pairs 1]
         return inner_product
 
 

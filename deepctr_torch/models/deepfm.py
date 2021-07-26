@@ -120,7 +120,7 @@ class DeepFM(BaseModel):
             sparse_embedding_list = []
 
         sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
-        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1)
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
         dense_value_tensor = concat_fun(dense_value_list)
 
         if self.emb_use_bn or self.emb_use_bn_simple:

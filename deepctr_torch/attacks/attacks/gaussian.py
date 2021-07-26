@@ -11,7 +11,7 @@ class GAUSSIAN(Attack):
     Distance Measure : Linf
     Arguments:
         model (nn.Module): model to attack.
-        eps (float): maximum perturbation. (DEFAULT: 0.001)
+        eps (float or list): maximum perturbation. (DEFAULT: 0.001)
 
     Shape:
         - samples: :math:`(N, L)` where `N = number of batches`, `L = lenth of data`.
