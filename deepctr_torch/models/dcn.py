@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 
 from .basemodel import BaseModel
-from ..inputs import combined_dnn_input
-from ..layers import CrossNet, DNN
+from ..inputs import combined_dnn_input, combined_dnn_input_tensor
+from ..layers import CrossNet, DNN, concat_fun
 
 
 class DCN(BaseModel):
@@ -71,13 +71,22 @@ class DCN(BaseModel):
         self.add_regularization_weight(self.crossnet.kernels, l2=l2_reg_cross)
         self.to(device)
 
-    def forward(self, X):
+    def get_embeddings(self, X, part_specified=False, value_lists=None):
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.embedding_dict)
+        linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
 
-        logit = self.linear_model(X)
-        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
-                                                                                  self.embedding_dict)
+        sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
+        dense_value_tensor = concat_fun(dense_value_list)
 
-        dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
+        return [dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor]
+
+    def use_embeddings(self, embeddings):
+
+        dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor = embeddings
+        logit = self.linear_model.use_embeddings(linear_sparse_embedding_tensor, dense_value_tensor)
+
+        dnn_input = combined_dnn_input_tensor(sparse_embedding_tensor, dense_value_tensor)
 
         if len(self.dnn_hidden_units) > 0 and self.cross_num > 0:  # Deep & Cross
             deep_out = self.dnn(dnn_input)
@@ -93,4 +102,13 @@ class DCN(BaseModel):
         else:  # Error
             pass
         y_pred = self.out(logit)
+
+        return y_pred
+
+    def forward(self, X):
+
+        embeddings = self.get_embeddings(X)
+
+        y_pred = self.use_embeddings(embeddings)
+
         return y_pred
