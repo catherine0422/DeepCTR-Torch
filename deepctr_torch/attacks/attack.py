@@ -23,7 +23,6 @@ class Attack(object):
         self.var_list = var_list
         self.trades = False
         self.bias_eps = bias_eps
-        self.nrmalized_attack = False
 
     def set_trades_mode(self, trades):
         self.trades = trades

@@ -81,7 +81,7 @@ class xDeepFM(BaseModel):
         linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
 
         sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
-        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(linear_sparse_embedding_list) >0 else None
         dense_value_tensor = concat_fun(dense_value_list)
 
         return [dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor]

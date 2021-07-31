@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 
 from .basemodel import BaseModel
-from ..inputs import combined_dnn_input
-from ..layers import CrossNetMix, DNN
+from ..inputs import combined_dnn_input, combined_dnn_input_tensor
+from ..layers import CrossNetMix, DNN, concat_fun
 
 
 class DCNMix(BaseModel):
@@ -76,18 +76,21 @@ class DCNMix(BaseModel):
         self.add_regularization_weight(self.crossnet.C_list, l2=l2_reg_cross)
         self.to(device)
 
-    def get_embeddings(self, X):
-        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
-                                                                                  self.embedding_dict)
+    def get_embeddings(self, X, part_specified=False, value_lists=None):
+        sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.embedding_dict)
         linear_sparse_embedding_list, linear_dense_value_list = self.linear_model.input_from_feature_columns(X)
 
-        return sparse_embedding_list, linear_sparse_embedding_list, dense_value_list
+        sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(linear_sparse_embedding_list) >0 else None
+        dense_value_tensor = concat_fun(dense_value_list)
 
-    def use_embeddings(self, sparse_embedding_list, linear_sparse_embedding_list, dense_value_list):
-        logit = self.linear_model.use_embeddings(linear_sparse_embedding_list, dense_value_list)
+        return [dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor]
 
+    def use_embeddings(self, embeddings):
+        dense_value_tensor, linear_sparse_embedding_tensor, sparse_embedding_tensor = embeddings
+        logit = self.linear_model.use_embeddings(linear_sparse_embedding_tensor, dense_value_tensor)
 
-        dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
+        dnn_input = combined_dnn_input_tensor(sparse_embedding_tensor, dense_value_tensor)
 
         if len(self.dnn_hidden_units) > 0 and self.cross_num > 0:  # Deep & Cross
             deep_out = self.dnn(dnn_input)
@@ -109,6 +112,6 @@ class DCNMix(BaseModel):
     def forward(self, X):
         embeddings = self.get_embeddings(X)
 
-        y_pred = self.use_embeddings(*embeddings)
+        y_pred = self.use_embeddings(embeddings)
 
         return y_pred

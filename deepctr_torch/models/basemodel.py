@@ -285,7 +285,7 @@ class BaseModel(nn.Module):
         steps_per_epoch = (sample_num - 1) // batch_size + 1
 
         # configure callbacks
-        callbacks = (callbacks or []) + [self.history]  # add history callback
+        callbacks = [self.history] + (callbacks or [])  # add history callback
         callbacks = CallbackList(callbacks)
         callbacks.set_model(self)
         callbacks.on_train_begin()
@@ -439,7 +439,11 @@ class BaseModel(nn.Module):
                             elif adv_type in ['normal', 'trades']:
                                 # prediction on original sample
                                 optim.zero_grad()
-                                y_pred = model(x)
+                                if attacker.attack == 'ONE_CLASS':
+                                    value_lists = model.get_one_hot_values(x)
+                                    y_pred = model.use_one_hot_values(x, value_lists)
+                                else:
+                                    y_pred = model(x)
                                 loss = loss_func(y_pred.squeeze(), y.squeeze(), reduction='sum')
 
                                 # prediction on adv sample
@@ -448,10 +452,11 @@ class BaseModel(nn.Module):
                                     attacker.set_trades_mode(True)
                                 if attacker.attack == 'ONE_CLASS':
                                     if count:
-                                        adv_value_lists, max_idx_count = attacker(x, y, model, count=count)
+                                        adv_value_lists, max_idx_count = attacker(x, y, model, count=count,
+                                                                                  value_lists=value_lists)
                                         total_max_idx_count = append_counts(total_max_idx_count, max_idx_count)
                                     else:
-                                        adv_value_lists = attacker(x, y, model)
+                                        adv_value_lists = attacker(x, y, model, value_lists=value_lists)
                                     adv_pred = model.use_one_hot_values(x, adv_value_lists)
                                 else:
                                     original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
@@ -478,7 +483,10 @@ class BaseModel(nn.Module):
                                 total_loss.backward()
                                 optim.step()
 
-                                del original_embeddings
+                                if attacker.attack == 'ONE_CLASS':
+                                    del value_lists,adv_value_lists
+                                else:
+                                    del original_embeddings
                                 del total_loss
                                 torch.cuda.empty_cache()
 

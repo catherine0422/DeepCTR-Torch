@@ -42,7 +42,7 @@ class DeepFM(BaseModel):
                  dnn_hidden_units=(256, 128),
                  l2_reg_linear=0.00001, l2_reg_embedding=0.00001, l2_reg_dnn=0, init_std=0.0001, seed=1024,
                  dnn_dropout=0, emb_use_bn=False, emb_use_bn_simple=False, ln=0, ln_part_specified=0,
-                 dnn_activation='relu', dnn_use_bn=False, task='binary', device='cpu', gpus=None):
+                 dnn_activation='relu', dnn_use_bn=False, task='binary', device='cpu', gpus=None, ln_mode=False):
 
         super(DeepFM, self).__init__(linear_feature_columns, dnn_feature_columns, l2_reg_linear=l2_reg_linear,
                                      l2_reg_embedding=l2_reg_embedding, init_std=init_std, seed=seed, task=task,
@@ -55,6 +55,7 @@ class DeepFM(BaseModel):
         self.use_fm = use_fm
         self.use_dnn = len(dnn_feature_columns) > 0 and len(
             dnn_hidden_units) > 0
+        self.ln_mode = ln_mode
         if use_fm:
             self.fm = FM()
 
@@ -120,7 +121,7 @@ class DeepFM(BaseModel):
             sparse_embedding_list = []
 
         sparse_embedding_tensor = concat_fun(sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
-        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(sparse_embedding_list) >0 else None
+        linear_sparse_embedding_tensor = concat_fun(linear_sparse_embedding_list).squeeze(dim=1) if len(linear_sparse_embedding_list) >0 else None
         dense_value_tensor = concat_fun(dense_value_list)
 
         if self.emb_use_bn or self.emb_use_bn_simple:
@@ -196,12 +197,29 @@ class DeepFM(BaseModel):
         y_pred = self.use_embeddings(embedding_lists)
         return y_pred
 
+    def convert_emb_to_ln(self):
+        if self.ln_mode == True:
+            print('The model is already on ln mode')
+        else:
+            def convert_emb_to_linear(emb):
+                weight = emb.weight
+                in_feat, out_feat = weight.size()
+                lin = torch.nn.Linear(in_feat, out_feat, bias=False)
+                lin.weight = torch.nn.Parameter(weight.t())
+                return lin
+
+            self.embedding_dict = torch.nn.ModuleDict(
+                {emb_name: convert_emb_to_linear(emb) for emb_name, emb in self.embedding_dict.items()})
+            self.linear_model.embedding_dict = torch.nn.ModuleDict(
+                {emb_name: convert_emb_to_linear(emb) for emb_name, emb in self.linear_model.embedding_dict.items()})
+            self.ln_mode=True
+
     def forward(self, X):
-
-        embedding_lists = self.get_embeddings(X)
-        y_pred = self.use_embeddings(embedding_lists)
-
-        # value_lists = self.get_one_hot_values(X)
-        # y_pred = self.use_one_hot_values(X,value_lists)
+        if self.ln_mode:
+            value_lists = self.get_one_hot_values(X)
+            y_pred = self.use_one_hot_values(X,value_lists)
+        else:
+            embedding_lists = self.get_embeddings(X)
+            y_pred = self.use_embeddings(embedding_lists)
 
         return y_pred
