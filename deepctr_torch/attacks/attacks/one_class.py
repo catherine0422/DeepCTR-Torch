@@ -34,7 +34,7 @@ class ONE_CLASS(Attack):
         self.random=random
         self.mask=mask
 
-    def attack_value_lists(self, adv_value_lists, i, type_idx, tensor_idx, ele_idx):
+    def attack_value_lists(self, adv_value_lists, grad_list, i, type_idx, tensor_idx, ele_idx):
 
         if type_idx == 2:
             length_row = adv_value_lists[type_idx][tensor_idx][i].size(-1)
@@ -48,7 +48,12 @@ class ONE_CLASS(Attack):
             adv_value_lists[type_idx][tensor_idx][i][0][delidx] = 0
             adv_value_lists[type_idx][tensor_idx][i][0][ele_idx] = 1
         else:
-            adv_value_lists[type_idx][tensor_idx][i][0] = adv_value_lists[type_idx][tensor_idx][i][0] + 1
+            if len(grad_list) > 0:
+                change = grad_list[type_idx][tensor_idx][i][0].sign()
+                adv_value_lists[type_idx][tensor_idx][i][0] = adv_value_lists[type_idx][tensor_idx][i][0] + change
+            else:
+                change = np.random.choice([-1,1])
+                adv_value_lists[type_idx][tensor_idx][i][0] = adv_value_lists[type_idx][tensor_idx][i][0] + change
 
         return adv_value_lists
 
@@ -75,7 +80,7 @@ class ONE_CLASS(Attack):
                 feature_name = feature_names[attack_feature_idx]
                 start_pos, end_pos, type_idx, tensor_idx = value_dict[feature_name]
                 ele_idx = np.random.randint(end_pos-start_pos)
-                adv_value_lists = self.attack_value_lists(adv_value_lists, i, type_idx, tensor_idx, ele_idx)
+                adv_value_lists = self.attack_value_lists(adv_value_lists, [], i, type_idx, tensor_idx, ele_idx)
                 if count:
                     max_idx_count = add_count(max_idx_count, (type_idx, tensor_idx, ele_idx))
 
@@ -106,7 +111,7 @@ class ONE_CLASS(Attack):
                 for (start_pos,end_pos,type_idx,tensor_idx) in value_dict.values():
                     if max_index < end_pos:
                         ele_idx = max_index-start_pos
-                        adv_value_lists = self.attack_value_lists(adv_value_lists, i, type_idx, tensor_idx, ele_idx)
+                        adv_value_lists = self.attack_value_lists(adv_value_lists, grad_list, i, type_idx, tensor_idx, ele_idx)
                         if count:
                             max_idx_count = add_count(max_idx_count, (type_idx, tensor_idx, ele_idx))
                         break

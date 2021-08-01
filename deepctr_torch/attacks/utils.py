@@ -77,6 +77,7 @@ def add_nestLists(xs, ys):
 
 def flatten_grad_list(grad_list):
     dense_list = torch.cat(grad_list[0], dim=-1) if len(grad_list[0]) > 0 else []
+    dense_list = torch.abs_(dense_list) if len(dense_list) > 0 else []
     sparse_list =  torch.cat(grad_list[1], dim=-1).squeeze() if len(grad_list[1]) > 0 else []
     varlen_list = [torch.flatten(x,start_dim=1) for x in grad_list[2]] if len(grad_list[2]) >0 else []
     varlen_list = torch.cat(varlen_list, dim=-1) if len(varlen_list) > 0 else []
