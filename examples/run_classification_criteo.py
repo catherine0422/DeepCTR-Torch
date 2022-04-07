@@ -10,7 +10,7 @@ from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 
 from deepctr_torch.inputs import SparseFeat, DenseFeat, get_feature_names
 from deepctr_torch.models import *
-from deepctr_torch.attacks import FGSM,PGD
+from deepctr_torch.attacks import FGSM,PGD,ONE_CLASS
 
 if __name__ == "__main__":
     data = pd.read_csv('./criteo_sample.txt')
@@ -56,21 +56,21 @@ if __name__ == "__main__":
         device = 'cuda:0'
 
 
-    # model = DeepFM(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
-    #                task='binary',
-    #                l2_reg_embedding=1e-5, device=device)
-    #
-    # model.compile("adam", "binary_crossentropy",
-    #               metrics=["binary_crossentropy", "auc"], )
-    #
-    #
-    # history = model.fit(train_model_input, train[target].values, batch_size=64, epochs=10, verbose=2,
-    #                     adv_type=None, validation_data=(test_model_input, test[target].values))
-    #
-    # torch.save(model, 'model.pth')
+    model = AutoInt(linear_feature_columns=linear_feature_columns, dnn_feature_columns=dnn_feature_columns,
+                   task='binary',
+                   l2_reg_embedding=1e-5, device=device)
+
+    model.compile("adam", "binary_crossentropy",
+                  metrics=["binary_crossentropy", "auc"], )
+
+
+    history = model.fit(train_model_input, train[target].values, batch_size=64, epochs=10, verbose=2,
+                        adv_type=None, validation_data=(test_model_input, test[target].values))
+
+    torch.save(model, 'model.pth')
 
     model = torch.load('model.pth')
-    eval_attacker = FGSM(eps=0.01)
+    eval_attacker = ONE_CLASS(random=True)
     eval = model.evaluate(test_model_input, test[target].values)
     print(eval)
     #
@@ -80,9 +80,9 @@ if __name__ == "__main__":
     model.compile("adam", "binary_crossentropy",
                   metrics=["binary_crossentropy", "auc"], )
 
-    attacker = FGSM(eps = 0.01)
+    attacker = ONE_CLASS(random=True)
     history = model.fit(train_model_input, train[target].values, batch_size=64, epochs=10, verbose=2,
-                        adv_type='trades', validation_data=(test_model_input, test[target].values),
+                        adv_type='normal', validation_data=(test_model_input, test[target].values),
                         attacker=attacker)
     eval = model.evaluate(test_model_input, test[target].values)
     print(eval)

@@ -544,25 +544,25 @@ class BaseModel(nn.Module):
                             if verbose > 1:
                                 current_time = time.time()
                                 batch_time = int(current_time - start_time)
-                                eval_str = f"{batch_time}s [{steps+1:05d}/{steps_per_epoch:05d}] - loss: {batch_logs['loss']: .4f}"
+                                eval_str = f"{batch_time}s [{steps+1:05d}/{steps_per_epoch:05d}] - loss: {batch_logs['loss']: .6f}"
 
                                 for name in self.metrics:
                                     eval_str += " - " + name + \
-                                                ": {0: .4f}".format(batch_logs[name])
+                                                ": {0: .6f}".format(batch_logs[name])
                                     if adv_type is not None:
                                         name_adv = "adv_" + name
                                         eval_str += " - " + name_adv + \
-                                                    ": {0: .4f}".format(batch_logs[name_adv])
+                                                    ": {0: .6f}".format(batch_logs[name_adv])
 
                                 if do_validation:
                                     eval_str += " \n "
                                     for name in self.metrics:
                                         eval_str += " - " + "val_" + name + \
-                                                    ": {0: .4f}".format(batch_logs["val_" + name])
+                                                    ": {0: .6f}".format(batch_logs["val_" + name])
                                         # if adv_type is not None:
                                         #     name_adv = "adv_" + name
                                         #     eval_str += " - " + "val_" + name_adv + \
-                                        #                 ": {0: .4f}".format(batch_logs["val_" + name_adv])
+                                        #                 ": {0: .6f}".format(batch_logs["val_" + name_adv])
                                 print(eval_str)
                             if type(save_freq) != str and (steps+1)%save_freq == 0:
                                 callbacks.on_train_batch_end(steps+1, batch_logs)
@@ -718,6 +718,45 @@ class BaseModel(nn.Module):
         pred_ans = np.concatenate(pred_ans).astype("float64")
         distortion = distortion_sum / len(test_loader)
         return pred_ans, distortion, total_max_idx_count
+
+    def adv_attack_rela_scale(self, x, y, attacker, batch_size=256):
+        model = self.eval()
+        model = self.eval()
+        if type(x) == str:
+            if type(y) != str:
+                raise ValueError('argument x and y should all be file name to use NpyDataset')
+            else:
+                tensor_data = NpyDataset(x, y)
+        else:
+            if isinstance(x, dict):
+                x = [x[feature] for feature in self.feature_index]
+            for i in range(len(x)):
+                if len(x[i].shape) == 1:
+                    x[i] = np.expand_dims(x[i], axis=1)
+            tensor_data = Data.TensorDataset(
+                torch.from_numpy(np.concatenate(x, axis=-1)),
+                torch.from_numpy(y))
+
+        test_loader = DataLoader(
+            dataset=tensor_data, shuffle=True, batch_size=batch_size)
+
+        distortion_sum = torch.tensor([0]).to(self.device).float()
+        pred_ans = []
+        with torch.no_grad():
+            x, label= test_loader.next()
+            x, label = x.to(self.device).float(), label.to(self.device).float()
+            original_embeddings = model.get_embeddings(x, part_specified=attacker.part_specified)
+            if attacker.normalized:
+                var_list = apply2nestLists(lambda x: torch.var(x.detach(), dim=0),
+                                           original_embeddings)
+                attacker.set_normalize_params(var_list)
+            with torch.enable_grad():
+                deltas = attacker(x, label, model)
+            adv_embeddings = add_nestLists(original_embeddings, deltas)
+            distortion_sum += get_rmse(deltas)
+            pred_an = model.use_embeddings(adv_embeddings)
+            pred_ans.append(pred_an.cpu().data.numpy())
+
 
     def get_full_emb_lists(self, x, batch_size=256, part_specified=False):
         r""" Calculate the scale of embeddings of x

@@ -38,7 +38,7 @@ class AutoInt(BaseModel):
 
     def __init__(self, linear_feature_columns, dnn_feature_columns, att_layer_num=3,
                  att_head_num=2, att_res=True, dnn_hidden_units=(256, 128), dnn_activation='relu',
-                 l2_reg_dnn=0, l2_reg_embedding=1e-5, dnn_use_bn=False, dnn_dropout=0, init_std=0.0001, seed=1024,
+                 l2_reg_dnn=0, emb_use_bn=False, l2_reg_embedding=1e-5, dnn_use_bn=False, dnn_dropout=0, init_std=0.0001, seed=1024,
                  task='binary', device='cpu', gpus=None):
 
         super(AutoInt, self).__init__(linear_feature_columns, dnn_feature_columns, l2_reg_linear=0,
@@ -46,6 +46,7 @@ class AutoInt(BaseModel):
                                       device=device, gpus=gpus)
         if len(dnn_hidden_units) <= 0 and att_layer_num <= 0:
             raise ValueError("Either hidden_layer or att_layer_num must > 0")
+        self.emb_use_bn = emb_use_bn
         self.use_dnn = len(dnn_feature_columns) > 0 and len(dnn_hidden_units) > 0
         field_num = len(self.embedding_dict)
 
@@ -72,6 +73,13 @@ class AutoInt(BaseModel):
         self.int_layers = nn.ModuleList(
             [InteractingLayer(embedding_size, att_head_num, att_res, device=device) for _ in range(att_layer_num)])
 
+        if self.emb_use_bn:
+            sparse_emb_size, linear_sparse_emb_size, dense_value_emb_size = self.emb_size_list_from_feature_columns()
+            self.emb_bn_sparse = nn.BatchNorm1d(sparse_emb_size, affine=True) if sparse_emb_size > 0 else None
+            self.emb_bn_linear_sparse = nn.BatchNorm1d(linear_sparse_emb_size,
+                                                       affine=True) if linear_sparse_emb_size > 0 else None
+            self.emb_bn_dense = nn.BatchNorm1d(dense_value_emb_size,
+                                               affine=True) if dense_value_emb_size > 0 else None
         self.to(device)
 
     def get_embeddings(self, X, part_specified=False, value_lists=None):
